@@ -49,6 +49,46 @@ contract LottoVRFTest is Test {
         assertGt(a5, 0);
     }
 
+    function testDrawZeroFlow() public {
+        uint256 price = lotto.ticketPrice();
+        address user = makeAddr("userZero");
+        vm.deal(user, 10 ether);
+
+        uint256 fulfillTimestamp = 1_234_567;
+        uint256 expectedRequestId = 1;
+
+        uint8[6] memory expectedNumbers = _computeExpectedNumbers(expectedRequestId, fulfillTimestamp);
+
+        // 회차 0 생성 및 판매 오픈 후 구매
+        lotto.createOrUpdateDraw(0, block.timestamp, true);
+        lotto.setCurrentDraw(0);
+
+        vm.prank(user);
+        lotto.buyTicket{value: price}(expectedNumbers, "ipfs://cid-zero");
+
+        // 다음 회차를 현재 회차로 설정하여 0회차 추첨 요청 가능하게 함
+        lotto.createOrUpdateDraw(1, block.timestamp + 1 days, true);
+        lotto.setCurrentDraw(1);
+
+        uint256 requestId = lotto.requestRandomWinningNumbers(0);
+        assertEq(requestId, expectedRequestId);
+
+        uint256 userBalanceBefore = user.balance;
+        uint256 poolBefore = lotto.prizePool(0);
+        assertEq(poolBefore, price);
+
+        vm.warp(fulfillTimestamp);
+        mock.fulfillRequest(requestId);
+
+        // 당첨 번호가 예상 번호와 일치하고 상금이 지급되었는지 확인
+        for (uint256 i = 0; i < 6; i++) {
+            assertEq(lotto.winningNumbers(0, i), expectedNumbers[i]);
+        }
+
+        assertEq(user.balance, userBalanceBefore + price);
+        assertEq(lotto.prizePool(0), 0);
+    }
+
     function _getWin(uint256 drawId) internal view returns (uint8, uint8, uint8, uint8, uint8, uint8) {
         return (
             lotto.winningNumbers(drawId, 0),
@@ -59,6 +99,10 @@ contract LottoVRFTest is Test {
             lotto.winningNumbers(drawId, 5)
         );
     }
+
+    function _computeExpectedNumbers(uint256 requestId, uint256 fulfillTimestamp) internal pure returns (uint8[6] memory numbers) {
+        for (uint256 i = 0; i < 6; i++) {
+            numbers[i] = uint8((uint256(keccak256(abi.encode(fulfillTimestamp, requestId, i))) % 45) + 1);
+        }
+    }
 }
-
-

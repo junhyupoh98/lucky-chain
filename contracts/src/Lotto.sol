@@ -44,7 +44,7 @@ contract Lotto is ERC721URIStorage, Ownable, VRFConsumerBaseV2 {
     uint16 i_requestConfirmations = 3; // VRF 요청 확인 블록 수
     uint16 constant NUM_WORDS = 6; // 요청할 난수의 개수
     
-    // 난수 요청 ID와 회차 ID를 연결
+    // 난수 요청 ID와 회차 ID를 연결합니다. (0 = 미설정이므로 drawId+1 저장)
     mapping(uint256 => uint256) public requestIdToDrawId;
     
     // --- 📢 [이벤트 추가] 📢 ---
@@ -141,7 +141,7 @@ contract Lotto is ERC721URIStorage, Ownable, VRFConsumerBaseV2 {
         );
         
         // 3. 요청 ID와 회차 ID를 연결
-        requestIdToDrawId[requestId] = _drawId;
+        requestIdToDrawId[requestId] = _drawId + 1;
 
         emit RandomWordsRequested(requestId, _drawId);
     }
@@ -157,6 +157,7 @@ contract Lotto is ERC721URIStorage, Ownable, VRFConsumerBaseV2 {
     {
         uint256 drawId = requestIdToDrawId[requestId];
         require(drawId != 0, "Lotto: Request ID not found.");
+        uint256 drawId = stored - 1;
         
         uint8[6] memory finalNumbers;
         
