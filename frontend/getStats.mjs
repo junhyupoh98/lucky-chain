@@ -2,13 +2,20 @@
 // frontend/getStats.mjs
 
 import { ethers } from 'ethers';
+import contractConfig from './lib/contractConfig.mjs';
+import lottoAbi from './lib/abi.json' assert { type: 'json' };
 
 // --- 설정 ---
-const RPC_URL = "https://public-en-kairos.node.kaia.io";
-const CONTRACT_ADDRESS = "0x96C6bF9200C62e5e72F280ecCE01f4A4B3E011D0";
-const LOTTO_CONTRACT_ABI = [
-    "function nextTicketId() view returns (uint256)"
-];
+const { rpcUrl: RPC_URL, address: CONTRACT_ADDRESS } = contractConfig;
+const LOTTO_CONTRACT_ABI = lottoAbi;
+
+if (!RPC_URL) {
+    throw new Error('RPC URL is not configured. Set NEXT_PUBLIC_LOTTO_RPC_URL, LOTTO_RPC_URL, RPC_URL, or KAIA_TESTNET_RPC_URL.');
+}
+
+if (!CONTRACT_ADDRESS) {
+    throw new Error('Contract address is not configured. Set NEXT_PUBLIC_LOTTO_ADDRESS, LOTTO_CONTRACT_ADDRESS, or CONTRACT_ADDRESS.');
+}
 // ------------
 
 async function main() {
