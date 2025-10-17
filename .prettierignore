@@ -1,0 +1,11 @@
+node_modules
+dist
+build
+public
+.git
+.gitignore
+**/*.png
+**/*.jpg
+**/*.jpeg
+**/*.gif
+**/*.svg
