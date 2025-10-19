@@ -3,6 +3,7 @@
 import {
     BrowserProvider,
     Contract,
+    JsonRpcProvider,
     JsonRpcSigner,
     TransactionReceipt,
     TransactionResponse,
@@ -117,6 +118,7 @@ const getExpectedChainId = () => {
 const getExpectedRpcUrl = () => contractConfig.rpcUrl ?? DEFAULT_RPC_URL;
 const CONTRACT_ADDRESS = contractConfig.address;
 const allowedAdminAddresses = staticAllowedAdmins ?? [];
+const CONFIGURED_RPC_URL = contractConfig.rpcUrl;
 
 const normalizeAddress = (value: string | null | undefined) =>
     (value ? value.toLowerCase() : null);
@@ -182,6 +184,19 @@ export function useLottoContract(): LottoContractContextValue {
         () => `0x${expectedChainId.toString(16)}` as `0x${string}`,
         [expectedChainId],
     );
+
+    const fallbackProvider = useMemo<JsonRpcProvider | null>(() => {
+        if (!CONFIGURED_RPC_URL) {
+            return null;
+        }
+
+        try {
+            return new JsonRpcProvider(CONFIGURED_RPC_URL);
+        } catch (error) {
+            console.error('Failed to initialize RPC provider', error);
+            return null;
+        }
+    }, [CONFIGURED_RPC_URL]);
 
     useEffect(() => {
         if (typeof window === 'undefined') {
@@ -315,12 +330,14 @@ export function useLottoContract(): LottoContractContextValue {
     }, [signer]);
 
     const readContract = useMemo(() => {
-        if (!provider || !CONTRACT_ADDRESS) {
+        const readProvider = provider ?? fallbackProvider;
+
+        if (!readProvider || !CONTRACT_ADDRESS) {
             return null;
         }
 
-        return new Contract(CONTRACT_ADDRESS, lottoAbi, provider);
-    }, [provider]);
+        return new Contract(CONTRACT_ADDRESS, lottoAbi, readProvider);
+    }, [fallbackProvider, provider]);
 
     useEffect(() => {
         if (!readContract) {

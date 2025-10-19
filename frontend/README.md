@@ -19,6 +19,9 @@ By default the app connects to the Kaia Kairos testnet. Configure the following 
 | `PINATA_JWT` *or* (`PINATA_API_KEY`, `PINATA_API_SECRET`) | Credentials used by `/api/uploadMetadata` when pinning ticket metadata |
 | `NEXT_PUBLIC_LOTTO_OWNER` / `NEXT_PUBLIC_LOTTO_ADMINS` | Optional comma-separated list of admin wallet addresses |
 
+> **Note:** The app instantiates a read-only RPC provider using `NEXT_PUBLIC_LOTTO_RPC_URL` so the home and admin pages can load
+> round data even when no wallet is connected. Make sure this endpoint is reachable from the browser environment.
+
 Example `.env.local` snippet:
 
 ```
