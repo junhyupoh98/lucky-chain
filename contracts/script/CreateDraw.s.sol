@@ -1,28 +1,42 @@
-// contracts/script/CreateDraw.s.sol (완성된 최종 코드)
-
 // SPDX-License-Identifier: MIT
-pragma solidity ^0.8.24; // 버전 통일: 컨트랙트와 동일
+pragma solidity ^0.8.24;
 
-import {Script} from "forge-std/Script.sol"; // 👈 2. 'Script' 도구 가져오기 (오류 2 해결)
+import "forge-std/Script.sol";
+import {console2} from "forge-std/console2.sol";
 import {Lotto} from "../src/Lotto.sol";
 
-contract CreateDraw is Script {
+contract ManageRounds is Script {
     function run() external {
-        // 이 주소는 우리가 새로 배포하고 검증한 Lotto 컨트랙트 주소입니다.
-        address lottoContractAddress = 0x96C6bF9200C62e5e72F280ecCE01f4A4B3E011D0;
-        Lotto lotto = Lotto(lottoContractAddress);
+        address contractAddress = vm.envAddress("LOTTO_CONTRACT_ADDRESS");
+        Lotto lotto = Lotto(contractAddress);
 
-        // --- 여기에 생성할 회차 정보를 입력하세요 ---
-        uint256 drawIdToCreate = 80;
-        uint256 drawTimestamp = 1761424800; // 예시: 2025년 10월 25일 토요일 오후 9시
+        uint256 adminKey = vm.envUint("PRIVATE_KEY");
+        vm.startBroadcast(adminKey);
 
-        vm.startBroadcast();
+        bool closed = true;
+        try lotto.closeCurrentRound() {
+            console2.log("Closed active round", lotto.currentRoundId() - 1);
+        } catch {
+            closed = false;
+            console2.log("Active round not ready to close");
+        }
 
-        // 1. 80회차의 추첨 날짜를 블록체인에 등록하고, 판매를 시작(true)합니다.
-        lotto.createOrUpdateDraw(drawIdToCreate, drawTimestamp, true);
+        if (!closed) {
+            Lotto.RoundView memory roundInfo = lotto.getRoundInfo(lotto.currentRoundId());
+            if (uint256(roundInfo.phase) == uint256(Lotto.Phase.Sales)) {
+                vm.stopBroadcast();
+                console2.log("Skipping new round: current round still selling");
+                return;
+            }
+        }
 
-        // 2. 현재 판매할 티켓은 80회차임을 컨트랙트에 알립니다.
-        lotto.setCurrentDraw(drawIdToCreate);
+        uint64 startTime = uint64(block.timestamp);
+        try vm.envUint("LOTTO_NEXT_ROUND_START") returns (uint256 value) {
+            startTime = uint64(value);
+        } catch {}
+
+        uint256 newRoundId = lotto.startNextRound(startTime);
+        console2.log("Started round", newRoundId);
 
         vm.stopBroadcast();
     }

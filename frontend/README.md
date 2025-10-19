@@ -1,36 +1,47 @@
-This is a [Next.js](https://nextjs.org) project bootstrapped with [`create-next-app`](https://nextjs.org/docs/app/api-reference/cli/create-next-app).
+# Lucky Chain frontend
 
-## Getting Started
+This Next.js app provides the Lucky Chain lottery experience. Players can connect a wallet, choose six numbers plus a lucky bonus number, upload metadata to Pinata, and mint an ERC-721 lottery ticket that corresponds to the on-chain round. Administrators can close rounds, start the next weekly epoch, request Chainlink VRF randomness, and finalize prize payouts.
 
-First, run the development server:
+## Getting started
 
 ```bash
+npm install
 npm run dev
-# or
-yarn dev
-# or
-pnpm dev
-# or
-bun dev
 ```
 
-Open [http://localhost:3000](http://localhost:3000) with your browser to see the result.
+By default the app connects to the Kaia Kairos testnet. Configure the following environment variables in `.env.local`:
 
-You can start editing the page by modifying `app/page.tsx`. The page auto-updates as you edit the file.
+| Variable | Description |
+| --- | --- |
+| `NEXT_PUBLIC_LOTTO_ADDRESS` | Deployed `Lotto` contract address |
+| `NEXT_PUBLIC_LOTTO_CHAIN_ID` | Chain ID for the target network (e.g. `1001` for Kairos) |
+| `NEXT_PUBLIC_LOTTO_RPC_URL` | RPC endpoint used by the browser and Node scripts |
+| `PINATA_JWT` *or* (`PINATA_API_KEY`, `PINATA_API_SECRET`) | Credentials used by `/api/uploadMetadata` when pinning ticket metadata |
+| `NEXT_PUBLIC_LOTTO_OWNER` / `NEXT_PUBLIC_LOTTO_ADMINS` | Optional comma-separated list of admin wallet addresses |
 
-This project uses [`next/font`](https://nextjs.org/docs/app/building-your-application/optimizing/fonts) to automatically optimize and load [Geist](https://vercel.com/font), a new font family for Vercel.
+Example `.env.local` snippet:
 
-## Learn More
+```
+NEXT_PUBLIC_LOTTO_ADDRESS=0xYourContract
+NEXT_PUBLIC_LOTTO_CHAIN_ID=1001
+NEXT_PUBLIC_LOTTO_RPC_URL=https://public-en-kairos.node.kaia.io
+PINATA_JWT=eyJhbGciOi...
+NEXT_PUBLIC_LOTTO_OWNER=0xAdminWallet
+```
 
-To learn more about Next.js, take a look at the following resources:
+Restart the dev server after updating environment variables.
 
-- [Next.js Documentation](https://nextjs.org/docs) - learn about Next.js features and API.
-- [Learn Next.js](https://nextjs.org/learn) - an interactive Next.js tutorial.
+## Features
 
-You can check out [the Next.js GitHub repository](https://github.com/vercel/next.js) - your feedback and contributions are welcome!
+- **Ticket purchase UI** – enter six manual numbers and a lucky number or generate an automatic ticket. Metadata is uploaded to Pinata before calling `buyTicket(numbers, luckyNumber, isAutoPick, tokenURI)`.
+- **Live round status** – the home page displays the active round ID, current phase, ticket price, and the most recently minted ticket.
+- **Admin console** – `/admin` exposes controls for closing sales, starting the next 1-week epoch, requesting VRF winning numbers, and finalizing payouts according to the new tiered distribution rules.
 
-## Deploy on Vercel
+## Utility scripts
 
-The easiest way to deploy your Next.js app is to use the [Vercel Platform](https://vercel.com/new?utm_medium=default-template&filter=next.js&utm_source=create-next-app&utm_campaign=create-next-app-readme) from the creators of Next.js.
+The `frontend` directory includes Node scripts that mirror the browser flow:
+- `manualMint.mjs` – prompts for wallet credentials and ticket numbers, uploads metadata, and executes `buyTicket`.
+- `getStats.mjs` – prints aggregate contract data (next ticket ID, current round status).
+- `readTokenData.mjs` – inspects stored ticket numbers, lucky numbers, and prize tiers for arbitrary token IDs.
 
-Check out our [Next.js deployment documentation](https://nextjs.org/docs/app/building-your-application/deploying) for more details.
+All scripts rely on the same environment variables used by the Next.js app.

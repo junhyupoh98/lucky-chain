@@ -22,11 +22,45 @@ import lottoAbi from '../../lib/abi.json';
 import { contractConfig } from '../../lib/contractConfig';
 import { allowedAdminAddresses as staticAllowedAdmins } from '../../lib/adminConfig';
 
+type RoundPhase = 'sales' | 'drawing' | 'claimable';
+
+type PhaseMapping = Record<number, RoundPhase>;
+
+const PHASE_MAP: PhaseMapping = {
+    0: 'sales',
+    1: 'drawing',
+    2: 'claimable',
+};
+
 export type TicketData = {
     id: string;
-    drawId: string;
+    roundId: string;
     purchasedAt: number;
     numbers: number[];
+    luckyNumber: number;
+    isAutoPick: boolean;
+    tier: number;
+    claimed: boolean;
+};
+
+export type RoundInfo = {
+    id: bigint;
+    startTime: number;
+    endTime: number;
+    phase: RoundPhase;
+    ticketCount: bigint;
+    gross: bigint;
+    carryIn: bigint;
+    carryOut: bigint;
+    winningNumbers: number[];
+    luckyNumber: number | null;
+    firstWinners: number;
+    secondWinners: number;
+    thirdWinners: number;
+    pFirst: bigint;
+    pSecond: bigint;
+    pThird: bigint;
+    payoutsFinalized: boolean;
 };
 
 export type LottoContractContextValue = {
@@ -41,24 +75,26 @@ export type LottoContractContextValue = {
     isWalletAvailable: boolean;
     pendingTransaction: string | null;
     ownerAddress: string | null;
-    currentDrawId: bigint | null;
+    currentRoundId: bigint | null;
     isAuthorizedOperator: boolean;
     allowedAdminAddresses: string[];
     connectWallet: () => Promise<void>;
     switchToExpectedNetwork: () => Promise<void>;
     getTicketPrice: () => Promise<bigint | null>;
+    getActiveRound: () => Promise<RoundInfo | null>;
+    getRoundInfo: (roundId: number | bigint) => Promise<RoundInfo | null>;
+    getTicketData: (ticketId: number | bigint) => Promise<TicketData | null>;
     buyTicket: (
         numbers: Array<number>,
+        luckyNumber: number,
+        isAutoPick: boolean,
         tokenURI: string,
     ) => Promise<TransactionReceipt | null>;
-    getTicketData: (ticketId: number | bigint) => Promise<TicketData | null>;
-    createOrUpdateDraw: (
-        drawId: number,
-        drawTimestamp: number,
-        isOpenForSale: boolean,
-    ) => Promise<TransactionReceipt>;
-    setCurrentDraw: (drawId: number) => Promise<TransactionReceipt>;
-    requestRandomWinningNumbers: (drawId: number) => Promise<TransactionReceipt>;
+    claimPrize: (ticketId: number | bigint) => Promise<TransactionReceipt | null>;
+    closeCurrentRound: () => Promise<TransactionReceipt | null>;
+    startNextRound: (startTime?: number) => Promise<TransactionReceipt | null>;
+    requestRandomWinningNumbers: (roundId: number | bigint) => Promise<TransactionReceipt | null>;
+    finalizePayouts: (roundId: number | bigint) => Promise<TransactionReceipt | null>;
 };
 
 const DEFAULT_CHAIN_ID = 1001;
@@ -85,13 +121,58 @@ const allowedAdminAddresses = staticAllowedAdmins ?? [];
 const normalizeAddress = (value: string | null | undefined) =>
     (value ? value.toLowerCase() : null);
 
+const mapPhase = (value: bigint | number): RoundPhase => {
+    const numeric = typeof value === 'bigint' ? Number(value) : value;
+    return PHASE_MAP[numeric] ?? 'sales';
+};
+
+const roundInfoFromContract = (payload: any): RoundInfo => {
+    const rawWinningNumbers = Array.from(payload.winningNumbers ?? []);
+    const normalizedWinningNumbers = rawWinningNumbers
+        .map((value: bigint | number) => Number(value))
+        .filter((value: number) => Number.isFinite(value) && value > 0);
+
+    const luckyValue = payload.luckyNumber ? Number(payload.luckyNumber) : null;
+
+    return {
+        id: BigInt(payload.id ?? 0),
+        startTime: Number(payload.startTime ?? 0),
+        endTime: Number(payload.endTime ?? 0),
+        phase: mapPhase(payload.phase ?? 0),
+        ticketCount: BigInt(payload.ticketCount ?? 0),
+        gross: BigInt(payload.gross ?? 0),
+        carryIn: BigInt(payload.carryIn ?? 0),
+        carryOut: BigInt(payload.carryOut ?? 0),
+        winningNumbers: normalizedWinningNumbers,
+        luckyNumber: luckyValue,
+        firstWinners: Number(payload.firstWinners ?? 0),
+        secondWinners: Number(payload.secondWinners ?? 0),
+        thirdWinners: Number(payload.thirdWinners ?? 0),
+        pFirst: BigInt(payload.pFirst ?? 0),
+        pSecond: BigInt(payload.pSecond ?? 0),
+        pThird: BigInt(payload.pThird ?? 0),
+        payoutsFinalized: Boolean(payload.payoutsFinalized ?? false),
+    };
+};
+
+const ticketInfoFromContract = (payload: any): TicketData => ({
+    id: BigInt(payload.ticketId ?? 0n).toString(),
+    roundId: BigInt(payload.roundId ?? 0n).toString(),
+    purchasedAt: Number(payload.purchasedAt ?? 0),
+    numbers: Array.from(payload.numbers ?? []).map((value: bigint | number) => Number(value)),
+    luckyNumber: Number(payload.luckyNumber ?? 0),
+    isAutoPick: Boolean(payload.isAutoPick ?? false),
+    tier: Number(payload.tier ?? 0),
+    claimed: Boolean(payload.claimed ?? false),
+});
+
 export function useLottoContract(): LottoContractContextValue {
     const [provider, setProvider] = useState<BrowserProvider | null>(null);
     const [signer, setSigner] = useState<JsonRpcSigner | null>(null);
     const [address, setAddress] = useState<string | null>(null);
     const [chainId, setChainId] = useState<number | null>(null);
     const [ownerAddress, setOwnerAddress] = useState<string | null>(null);
-    const [currentDrawId, setCurrentDrawId] = useState<bigint | null>(null);
+    const [currentRoundId, setCurrentRoundId] = useState<bigint | null>(null);
     const [isWalletAvailable, setIsWalletAvailable] = useState<boolean>(true);
     const [isConnecting, setIsConnecting] = useState<boolean>(false);
     const [pendingTransaction, setPendingTransaction] = useState<string | null>(null);
@@ -244,7 +325,7 @@ export function useLottoContract(): LottoContractContextValue {
     useEffect(() => {
         if (!readContract) {
             setOwnerAddress(null);
-            setCurrentDrawId(null);
+            setCurrentRoundId(null);
             return;
         }
 
@@ -252,13 +333,13 @@ export function useLottoContract(): LottoContractContextValue {
 
         const loadContractState = async () => {
             try {
-                const [owner, currentDraw] = await Promise.all([
+                const [owner, roundId] = await Promise.all([
                     readContract.owner(),
-                    readContract.currentDrawId(),
+                    readContract.currentRoundId(),
                 ]);
                 if (!cancelled) {
                     setOwnerAddress(owner as string);
-                    setCurrentDrawId(currentDraw as bigint);
+                    setCurrentRoundId(roundId as bigint);
                 }
             } catch (error) {
                 console.error('Failed to load contract metadata', error);
@@ -310,7 +391,12 @@ export function useLottoContract(): LottoContractContextValue {
     }, [address, contractWithSigner, ownerAddress]);
 
     const buyTicket = useCallback(
-        async (numbers: Array<number>, tokenURI: string): Promise<TransactionReceipt | null> => {
+        async (
+            numbers: Array<number>,
+            luckyNumber: number,
+            isAutoPick: boolean,
+            tokenURI: string,
+        ): Promise<TransactionReceipt | null> => {
             if (!contractWithSigner) {
                 throw new Error('Connect your wallet before buying tickets.');
             }
@@ -321,9 +407,15 @@ export function useLottoContract(): LottoContractContextValue {
 
             try {
                 const ticketPrice = await contractWithSigner.ticketPrice();
-                const tx: TransactionResponse = await contractWithSigner.buyTicket(numbers, tokenURI, {
-                    value: ticketPrice,
-                });
+                const tx: TransactionResponse = await contractWithSigner.buyTicket(
+                    numbers,
+                    luckyNumber,
+                    isAutoPick,
+                    tokenURI,
+                    {
+                        value: ticketPrice,
+                    },
+                );
                 updatePending(tx.hash);
                 const receipt = await tx.wait();
                 updatePending(null);
@@ -344,21 +436,8 @@ export function useLottoContract(): LottoContractContextValue {
 
             try {
                 const id = typeof ticketId === 'bigint' ? ticketId : BigInt(ticketId);
-                const [timestamp, drawId] = await Promise.all([
-                    readContract.purchaseTimestamps(id),
-                    readContract.ticketToDraw(id),
-                ]);
-
-                const numbers = await Promise.all(
-                    Array.from({ length: 6 }, (_, index) => readContract.ticketNumbers(id, index)),
-                );
-
-                return {
-                    id: id.toString(),
-                    drawId: drawId.toString(),
-                    purchasedAt: Number(timestamp),
-                    numbers: numbers.map((value) => Number(value)),
-                };
+                const response = await readContract.getTicketInfo(id);
+                return ticketInfoFromContract(response);
             } catch (error) {
                 console.error('Failed to fetch ticket data', error);
                 return null;
@@ -367,62 +446,70 @@ export function useLottoContract(): LottoContractContextValue {
         [readContract],
     );
 
-    const createOrUpdateDraw = useCallback(
-        async (drawId: number, drawTimestamp: number, isOpenForSale: boolean) => {
-            const contractInstance = requireAuthorizedSigner();
-
-            if (!Number.isInteger(drawId) || drawId < 0) {
-                throw new Error('Draw ID must be a non-negative integer.');
-            }
-
-            if (!Number.isInteger(drawTimestamp) || drawTimestamp <= 0) {
-                throw new Error('Draw timestamp must be a positive Unix timestamp.');
-            }
-
-            const currentTimestamp = Math.floor(Date.now() / 1000);
-            if (drawTimestamp <= currentTimestamp) {
-                throw new Error('Draw timestamp must be in the future.');
+    const getRoundInfo = useCallback(
+        async (roundId: number | bigint): Promise<RoundInfo | null> => {
+            if (!readContract) {
+                return null;
             }
 
             try {
-                const tx: TransactionResponse = await contractInstance.createOrUpdateDraw(
-                    BigInt(drawId),
-                    BigInt(drawTimestamp),
-                    isOpenForSale,
-                );
-                updatePending(tx.hash);
-                const receipt = await tx.wait();
-                updatePending(null);
-                if (!receipt) {
-                    throw new Error('Transaction could not be confirmed.');
-                }
-                return receipt;
+                const id = typeof roundId === 'bigint' ? roundId : BigInt(roundId);
+                const response = await readContract.getRoundInfo(id);
+                return roundInfoFromContract(response);
             } catch (error) {
-                updatePending(null);
-                throw error;
+                console.error('Failed to fetch round info', error);
+                return null;
             }
         },
-        [requireAuthorizedSigner, updatePending],
+        [readContract],
     );
+    const getActiveRound = useCallback(async (): Promise<RoundInfo | null> => {
+        if (!readContract) {
+            return null;
+        }
 
-    const setCurrentDraw = useCallback(
-        async (drawId: number) => {
+        try {
+            const roundId: bigint = await readContract.currentRoundId();
+            if (roundId === 0n) {
+                return null;
+            }
+            const response = await readContract.getRoundInfo(roundId);
+            return roundInfoFromContract(response);
+        } catch (error) {
+            console.error('Failed to load active round info', error);
+            return null;
+        }
+    }, [readContract]);
+
+    const closeCurrentRound = useCallback(async (): Promise<TransactionReceipt | null> => {
+        const contractInstance = requireAuthorizedSigner();
+        try {
+            const tx: TransactionResponse = await contractInstance.closeCurrentRound();
+            updatePending(tx.hash);
+            const receipt = await tx.wait();
+            updatePending(null);
+            return receipt ?? null;
+        } catch (error) {
+            updatePending(null);
+            throw error;
+        }
+    }, [requireAuthorizedSigner, updatePending]);
+
+    const startNextRound = useCallback(
+        async (startTime?: number): Promise<TransactionReceipt | null> => {
             const contractInstance = requireAuthorizedSigner();
 
-            if (!Number.isInteger(drawId) || drawId < 0) {
-                throw new Error('Draw ID must be a non-negative integer.');
-            }
-
             try {
-                const tx: TransactionResponse = await contractInstance.setCurrentDraw(BigInt(drawId));
+                const args = startTime ? [BigInt(startTime)] : [0n];
+                const tx: TransactionResponse = await contractInstance.startNextRound(...args);
                 updatePending(tx.hash);
                 const receipt = await tx.wait();
                 updatePending(null);
-                if (!receipt) {
-                    throw new Error('Transaction could not be confirmed.');
+                if (receipt) {
+                    const latest = await contractInstance.currentRoundId();
+                    setCurrentRoundId(latest as bigint);
                 }
-                setCurrentDrawId(BigInt(drawId));
-                return receipt;
+                return receipt ?? null;
             } catch (error) {
                 updatePending(null);
                 throw error;
@@ -432,34 +519,63 @@ export function useLottoContract(): LottoContractContextValue {
     );
 
     const requestRandomWinningNumbers = useCallback(
-        async (drawId: number) => {
+        async (roundId: number | bigint): Promise<TransactionReceipt | null> => {
             const contractInstance = requireAuthorizedSigner();
-
-            if (!Number.isInteger(drawId) || drawId < 0) {
-                throw new Error('Draw ID must be a non-negative integer.');
-            }
-
-            if (currentDrawId !== null && BigInt(drawId) >= currentDrawId) {
-                throw new Error('Draw ID must reference a completed draw.');
-            }
+            const id = typeof roundId === 'bigint' ? roundId : BigInt(roundId);
 
             try {
-                const tx: TransactionResponse = await contractInstance.requestRandomWinningNumbers(
-                    BigInt(drawId),
-                );
+                const tx: TransactionResponse = await contractInstance.requestRandomWinningNumbers(id);
                 updatePending(tx.hash);
                 const receipt = await tx.wait();
                 updatePending(null);
-                if (!receipt) {
-                    throw new Error('Transaction could not be confirmed.');
-                }
-                return receipt;
+                return receipt ?? null;
             } catch (error) {
                 updatePending(null);
                 throw error;
             }
         },
-        [currentDrawId, requireAuthorizedSigner, updatePending],
+        [requireAuthorizedSigner, updatePending],
+    );
+
+    const finalizePayouts = useCallback(
+        async (roundId: number | bigint): Promise<TransactionReceipt | null> => {
+            const contractInstance = requireAuthorizedSigner();
+            const id = typeof roundId === 'bigint' ? roundId : BigInt(roundId);
+
+            try {
+                const tx: TransactionResponse = await contractInstance.finalizePayouts(id);
+                updatePending(tx.hash);
+                const receipt = await tx.wait();
+                updatePending(null);
+                return receipt ?? null;
+            } catch (error) {
+                updatePending(null);
+                throw error;
+            }
+        },
+        [requireAuthorizedSigner, updatePending],
+    );
+
+    const claimPrize = useCallback(
+        async (ticketId: number | bigint): Promise<TransactionReceipt | null> => {
+            if (!contractWithSigner) {
+                throw new Error('Connect your wallet before claiming prizes.');
+            }
+
+            const id = typeof ticketId === 'bigint' ? ticketId : BigInt(ticketId);
+
+            try {
+                const tx: TransactionResponse = await contractWithSigner.claimPrize(id);
+                updatePending(tx.hash);
+                const receipt = await tx.wait();
+                updatePending(null);
+                return receipt ?? null;
+            } catch (error) {
+                updatePending(null);
+                throw error;
+            }
+        },
+        [contractWithSigner, updatePending],
     );
 
     const isAuthorizedOperator = useMemo(() => {
@@ -483,17 +599,21 @@ export function useLottoContract(): LottoContractContextValue {
         isWalletAvailable,
         pendingTransaction,
         ownerAddress,
-        currentDrawId,
+        currentRoundId,
         isAuthorizedOperator,
         allowedAdminAddresses,
         connectWallet,
         switchToExpectedNetwork,
         getTicketPrice,
-        buyTicket,
+        getActiveRound,
+        getRoundInfo,
         getTicketData,
-        createOrUpdateDraw,
-        setCurrentDraw,
+        buyTicket,
+        claimPrize,
+        closeCurrentRound,
+        startNextRound,
         requestRandomWinningNumbers,
+        finalizePayouts,
     };
 }
 

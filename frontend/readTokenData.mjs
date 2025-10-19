@@ -1,14 +1,12 @@
 // node readTokenData.mjs
-// frontend/readTokenData.mjs (데이터 분석 도구 최종 버전)
 
 import { ethers } from 'ethers';
 import readline from 'readline/promises';
+
 import contractConfig from './lib/contractConfig.mjs';
 import lottoAbi from './lib/abi.json' assert { type: 'json' };
 
-// --- ⚙️ 설정 ---
 const { rpcUrl: RPC_URL, address: CONTRACT_ADDRESS } = contractConfig;
-const LOTTO_CONTRACT_ABI = lottoAbi;
 
 if (!RPC_URL) {
     throw new Error('RPC URL is not configured. Set NEXT_PUBLIC_LOTTO_RPC_URL, LOTTO_RPC_URL, RPC_URL, or KAIA_TESTNET_RPC_URL.');
@@ -17,99 +15,80 @@ if (!RPC_URL) {
 if (!CONTRACT_ADDRESS) {
     throw new Error('Contract address is not configured. Set NEXT_PUBLIC_LOTTO_ADDRESS, LOTTO_CONTRACT_ADDRESS, or CONTRACT_ADDRESS.');
 }
-// ------------
 
-// --- 헬퍼 함수: 특정 ID의 모든 데이터를 가져오는 함수 ---
-async function getTokenData(contract, ticketId) {
+async function getTicketInfo(contract, ticketId) {
     try {
-        // 여러 데이터를 한 번에 병렬로 요청해서 가져옵니다.
-        const [timestamp, drawId] = await Promise.all([
-            contract.purchaseTimestamps(ticketId),
-            contract.ticketToDraw(ticketId)
-        ]);
-        
-        // 로또 번호 6개를 순서대로 요청합니다.
-        const numbersPromises = [];
-        for (let i = 0; i < 6; i++) {
-            numbersPromises.push(contract.ticketNumbers(ticketId, i));
-        }
-        const numbers = await Promise.all(numbersPromises);
-
-        // 결과를 보기 좋게 객체로 만들어 반환합니다.
+        const info = await contract.getTicketInfo(BigInt(ticketId));
         return {
             id: ticketId,
-            drawId: drawId.toString(),
-            date: new Date(Number(timestamp) * 1000).toLocaleString('ko-KR'),
-            numbers: `[${numbers.join(', ')}]`
+            roundId: info.roundId.toString(),
+            purchasedAt: new Date(Number(info.purchasedAt) * 1000).toISOString(),
+            numbers: info.numbers.map((value) => Number(value)).join(', '),
+            luckyNumber: Number(info.luckyNumber),
+            mode: info.isAutoPick ? 'Auto' : 'Manual',
+            tier: Number(info.tier),
+            claimed: info.claimed,
         };
-    } catch (error) {
-        // ownerOf 조회 실패 등.. 존재하지 않는 토큰이면 null 반환
-        return null; 
+    } catch {
+        return null;
     }
 }
 
-
-// --- ✅ 메인 실행 함수 ---
 async function main() {
     const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
 
-    console.log("\n--- Kiwoom Lottery 데이터 조회 도구 ---");
+    console.log('\n--- Lucky Chain ticket inspector ---');
     const choice = await rl.question(
-        "❓ 어떤 작업을 하시겠습니까?\n" +
-        "   1. 특정 티켓 ID 조회\n" +
-        "   2. 가장 처음 발행된 티켓 10개 표시\n" +
-        "   3. 가장 최근 발행된 티켓 10개 표시\n" +
-        "   (번호 입력): "
+        'Select an option:\n'
+        + '  1. Inspect a specific ticket ID\n'
+        + '  2. Show the first 10 tickets\n'
+        + '  3. Show the latest 10 tickets\n'
+        + 'Enter selection: ',
     );
 
     const provider = new ethers.JsonRpcProvider(RPC_URL);
-    const contract = new ethers.Contract(CONTRACT_ADDRESS, LOTTO_CONTRACT_ABI, provider);
-    
-    let ticketIdsToCheck = [];
+    const contract = new ethers.Contract(CONTRACT_ADDRESS, lottoAbi, provider);
+
+    let ticketIds = [];
 
     switch (choice.trim()) {
-        case '1':
-            const idAnswer = await rl.question('👉 조회할 티켓의 진짜 ID를 입력하세요: ');
-            const singleId = parseInt(idAnswer, 10);
-            if (!isNaN(singleId)) {
-                ticketIdsToCheck.push(singleId);
-            } else {
-                console.error("❌ 유효한 숫자가 아닙니다.");
+        case '1': {
+            const idAnswer = await rl.question('Enter the ticket ID: ');
+            const id = Number.parseInt(idAnswer, 10);
+            if (Number.isFinite(id)) {
+                ticketIds.push(id);
             }
             break;
-            
+        }
         case '2':
-            console.log("\n🔍 가장 처음 발행된 티켓 10개를 조회합니다...");
-            for (let i = 0; i < 10; i++) {
-                ticketIdsToCheck.push(i);
+            ticketIds = Array.from({ length: 10 }, (_, index) => index);
+            break;
+        case '3': {
+            const total = await contract.nextTicketId();
+            const start = Number(total) - 10;
+            for (let i = Math.max(0, start); i < Number(total); i += 1) {
+                ticketIds.push(i);
+            }
+            if (Number(total) === 0) {
+                console.log('No tickets minted yet.');
             }
             break;
-            
-        case '3':
-            console.log("\n🔍 가장 최근 발행된 티켓 10개를 조회합니다...");
-            const totalTickets = await contract.nextTicketId();
-            const startId = Math.max(0, Number(totalTickets) - 10);
-            for (let i = startId; i < totalTickets; i++) {
-                ticketIdsToCheck.push(i);
-            }
-            if (totalTickets == 0) console.log("   (아직 발행된 티켓이 없습니다.)");
-            break;
-            
+        }
         default:
-            console.log("🤷‍♀️ 잘못된 선택입니다.");
-            break;
+            console.log('Invalid choice.');
     }
-    
+
     rl.close();
 
-    if (ticketIdsToCheck.length > 0) {
-        // 조회할 ID 목록의 데이터를 병렬로 한 번에 가져옵니다.
-        const dataPromises = ticketIdsToCheck.map(id => getTokenData(contract, id));
-        const results = await Promise.all(dataPromises);
-        
-        // 보기 좋게 테이블 형태로 출력합니다.
-        console.table(results.filter(r => r !== null)); // 존재하지 않는 토큰(null)은 제외
+    if (ticketIds.length === 0) {
+        return;
     }
+
+    const results = await Promise.all(ticketIds.map((id) => getTicketInfo(contract, id)));
+    console.table(results.filter(Boolean));
 }
 
-main();
+main().catch((error) => {
+    console.error('Failed to fetch ticket data:', error);
+    process.exitCode = 1;
+});
