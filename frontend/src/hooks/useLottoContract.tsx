@@ -185,7 +185,7 @@ export function useLottoContract(): LottoContractContextValue {
         [expectedChainId],
     );
 
-    const fallbackProvider = useMemo<JsonRpcProvider | null>(() => {
+    const staticProvider = useMemo<JsonRpcProvider | null>(() => {
         if (!CONFIGURED_RPC_URL) {
             return null;
         }
@@ -330,14 +330,14 @@ export function useLottoContract(): LottoContractContextValue {
     }, [signer]);
 
     const readContract = useMemo(() => {
-        const readProvider = provider ?? fallbackProvider;
+        const readProvider = signer?.provider ?? provider ?? staticProvider;
 
         if (!readProvider || !CONTRACT_ADDRESS) {
             return null;
         }
 
         return new Contract(CONTRACT_ADDRESS, lottoAbi, readProvider);
-    }, [fallbackProvider, provider]);
+    }, [provider, signer, staticProvider]);
 
     useEffect(() => {
         if (!readContract) {

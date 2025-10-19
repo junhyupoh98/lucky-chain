@@ -20,7 +20,8 @@ By default the app connects to the Kaia Kairos testnet. Configure the following 
 | `NEXT_PUBLIC_LOTTO_OWNER` / `NEXT_PUBLIC_LOTTO_ADMINS` | Optional comma-separated list of admin wallet addresses |
 
 > **Note:** The app instantiates a read-only RPC provider using `NEXT_PUBLIC_LOTTO_RPC_URL` so the home and admin pages can load
-> round data even when no wallet is connected. Make sure this endpoint is reachable from the browser environment.
+> round data even when no wallet is connected. Make sure this endpoint is reachable from the browser environment, otherwise read
+> helpers such as `getTicketPrice` and `getActiveRound` will fail before a wallet is connected.
 
 Example `.env.local` snippet:
 

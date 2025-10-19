@@ -7,11 +7,20 @@ libs = ["lib"]
 
 solc_version = "0.8.24"
 
+optimizer = true
+optimizer_runs = 200
+via_ir = true
+
 # 정확한 라이브러리 remapping
 remappings = [
+    # forge-std
     "forge-std/=lib/forge-std/src/",
+
+    # OpenZeppelin: import가 "@openzeppelin/contracts/..." 이므로 /contracts/까지 매핑
     "@openzeppelin/contracts/=lib/openzeppelin-contracts/contracts/",
-    "@chainlink/contracts/=lib/chainlink/contracts/src/"
+
+    # Chainlink: import가 "@chainlink/contracts/src/..." 이므로 /contracts/까지만 매핑
+    "@chainlink/contracts/=lib/chainlink-brownie-contracts/contracts/"
 ]
 
 # foundry.toml 파일 맨 아래에 추가
