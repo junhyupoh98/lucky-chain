@@ -1,18 +1,17 @@
 [profile.default]
 src = "src"
 out = "out"
-libs = ["lib", "../lib"]
+libs = ["lib"]
 
 # See more config options https://github.com/foundry-rs/foundry/blob/master/crates/config/README.md#all-options
 
 solc_version = "0.8.24"
 
-skip_files = ["lib/openzeppelin-contracts/certora/"]
-
 # 정확한 라이브러리 remapping
 remappings = [
-    "@openzeppelin/contracts/=../lib/openzeppelin-contracts/contracts/",
-    "@chainlink/contracts/=../lib/chainlink-local/lib/chainlink-evm/contracts/"
+    "forge-std/=lib/forge-std/src/",
+    "@openzeppelin/contracts/=lib/openzeppelin-contracts/contracts/",
+    "@chainlink/contracts/=lib/chainlink/contracts/src/"
 ]
 
 # foundry.toml 파일 맨 아래에 추가
