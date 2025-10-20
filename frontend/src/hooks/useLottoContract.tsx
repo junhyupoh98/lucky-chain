@@ -164,8 +164,25 @@ const FRIENDLY_ERROR_MESSAGES: Record<string, string> = {
     WrongPhase: 'Ticket sales are currently closed.',
 };
 
+type FriendlyReasonRule = {
+    match: (reason: string) => boolean;
+    message: string;
+};
+
+const FRIENDLY_REASON_RULES: FriendlyReasonRule[] = [
+    {
+        match: (reason) => reason.toLowerCase().includes('incorrect payment'),
+        message:
+            'The ticket price changed before your purchase went through. Please refresh the page and try again.',
+    },
+    {
+        match: (reason) => reason.toLowerCase().includes('sales window closed'),
+        message: 'Ticket sales for this round have already closed.',
+    },
+];
+
 const cleanRevertReason = (value: string): string =>
-    value.replace(/^execution reverted:?\s*/i, '').trim();
+    value.replace(/^execution reverted:\s*/i, '').trim();
 
 const isMissingRevertDataMessage = (value: string | null | undefined): boolean =>
     typeof value === 'string' && value.toLowerCase().includes('missing revert data');
@@ -329,9 +346,27 @@ const normalizeContractError = (
     }
 
     if (error instanceof Error) {
+        const normalizedMessage = error.message.toLowerCase();
+        if (normalizedMessage.includes('insufficient funds')) {
+            const wrapped = new Error(
+                'Your wallet balance is too low to cover the ticket cost and gas fees. Add more KAIA and try again.',
+            );
+            (wrapped as any).cause = error;
+            return wrapped;
+        }
+
         const reason = extractReasonMessage(error);
         if (reason && !isMissingRevertDataMessage(reason)) {
-            const wrapped = new Error(cleanRevertReason(reason));
+            const cleaned = cleanRevertReason(reason);
+            for (const rule of FRIENDLY_REASON_RULES) {
+                if (rule.match(cleaned)) {
+                    const wrapped = new Error(rule.message);
+                    (wrapped as any).cause = error;
+                    return wrapped;
+                }
+            }
+
+            const wrapped = new Error(cleaned);
             (wrapped as any).cause = error;
             return wrapped;
         }
@@ -755,6 +790,44 @@ export function useLottoContract(): LottoContractContextValue {
                 };
             });
 
+            const roundStateContract = readContract ?? contractWithSigner;
+
+            if (roundStateContract) {
+                try {
+                    const currentRound: bigint = await roundStateContract.currentRoundId();
+
+                    if (currentRound === BigInt(0)) {
+                        throw new Error('Ticket sales are currently closed.');
+                    }
+
+                    const rawRoundInfo = await roundStateContract.getRoundInfo(currentRound);
+                    const activeRound = roundInfoFromContract(rawRoundInfo);
+                    const now = Math.floor(Date.now() / 1000);
+
+                    if (activeRound.phase !== 'sales') {
+                        throw new Error('Ticket sales are currently closed.');
+                    }
+
+                    if (now < activeRound.startTime) {
+                        throw new Error('Ticket sales have not opened yet. Please try again soon.');
+                    }
+
+                    if (now > activeRound.endTime) {
+                        throw new Error('Ticket sales for this round have ended.');
+                    }
+                } catch (roundStateError) {
+                    if (
+                        roundStateError instanceof Error &&
+                        (roundStateError.message.includes('Ticket sales') ||
+                            roundStateError.message.includes('round have ended'))
+                    ) {
+                        throw roundStateError;
+                    }
+
+                    console.warn('Failed to preflight round state before purchase', roundStateError);
+                }
+            }
+
             try {
                 const rawPrice = await contractWithSigner.ticketPrice();
                 let ticketPrice: bigint;
@@ -781,21 +854,22 @@ export function useLottoContract(): LottoContractContextValue {
                 const tokenUrisPayload = normalizedTickets.map((ticket) => ticket.tokenURI);
 
                 const estimationContract = readContract ?? contractWithSigner;
+                const estimateGasModule = estimationContract?.estimateGas as unknown;
+                let estimatedGas: bigint | null = null;
                 let gasLimitOverride: bigint | null = null;
 
-                const estimateGasModule = estimationContract?.estimateGas as unknown;
+                const estimationOverrides: Record<string, any> = { value: totalCost };
+                if (address) {
+                    estimationOverrides.from = address;
+                }
 
                 if (estimateGasModule && typeof (estimateGasModule as any).buyTickets === 'function') {
                     const estimateBuyTickets = (estimateGasModule as any).buyTickets as (
                         ...args: Array<any>
                     ) => Promise<bigint>;
-                    const estimationOverrides: Record<string, any> = { value: totalCost };
-                    if (address) {
-                        estimationOverrides.from = address;
-                    }
 
                     try {
-                        const estimatedGas: bigint = await estimateBuyTickets(
+                        estimatedGas = await estimateBuyTickets(
                             numbersPayload,
                             luckyNumbersPayload,
                             autoPicksPayload,
@@ -810,6 +884,110 @@ export function useLottoContract(): LottoContractContextValue {
                         }
                     } catch (estimationError) {
                         console.warn('Failed to estimate gas for buyTickets', estimationError);
+                        estimatedGas = null;
+                    }
+                }
+
+                if (address) {
+                    const balanceProviders: Array<{ getBalance: (wallet: string) => Promise<bigint> }> = [];
+
+                    const maybeProvider = provider as
+                        | (BrowserProvider & { getBalance: (wallet: string) => Promise<bigint> })
+                        | null;
+                    if (maybeProvider && typeof maybeProvider.getBalance === 'function') {
+                        balanceProviders.push(maybeProvider);
+                    }
+
+                    const runner: any = contractWithSigner.runner ?? null;
+                    const runnerProviderCandidate: unknown =
+                        runner && typeof runner === 'object' && 'provider' in runner ? runner.provider : null;
+                    if (
+                        runnerProviderCandidate &&
+                        typeof (runnerProviderCandidate as any).getBalance === 'function'
+                    ) {
+                        const typedRunnerProvider = runnerProviderCandidate as {
+                            getBalance: (wallet: string) => Promise<bigint>;
+                        };
+                        if (!balanceProviders.includes(typedRunnerProvider)) {
+                            balanceProviders.push(typedRunnerProvider);
+                        }
+                    }
+
+                    let requiredBalance = totalCost;
+                    const feeDataProviders: Array<{
+                        getFeeData?: () => Promise<{ maxFeePerGas?: bigint | null; gasPrice?: bigint | null }>;
+                        getGasPrice?: () => Promise<bigint>;
+                    }> = [];
+
+                    const feeProviderCandidates: Array<any> = [
+                        contractWithSigner.runner?.provider ?? null,
+                        provider ?? null,
+                    ];
+
+                    for (const candidate of feeProviderCandidates) {
+                        if (!candidate || typeof candidate !== 'object') {
+                            continue;
+                        }
+                        const hasGetFeeData = typeof (candidate as any).getFeeData === 'function';
+                        const hasGetGasPrice = typeof (candidate as any).getGasPrice === 'function';
+                        if (hasGetFeeData || hasGetGasPrice) {
+                            feeDataProviders.push(candidate as {
+                                getFeeData?: () => Promise<{ maxFeePerGas?: bigint | null; gasPrice?: bigint | null }>;
+                                getGasPrice?: () => Promise<bigint>;
+                            });
+                        }
+                    }
+
+                    if (estimatedGas && estimatedGas > BigInt(0)) {
+                        for (const feeProvider of feeDataProviders) {
+                            try {
+                                let gasPrice: bigint | null = null;
+                                if (feeProvider.getFeeData) {
+                                    const feeData = await feeProvider.getFeeData();
+                                    gasPrice = feeData.maxFeePerGas ?? feeData.gasPrice ?? null;
+                                }
+
+                                if (!gasPrice && feeProvider.getGasPrice) {
+                                    gasPrice = await feeProvider.getGasPrice();
+                                }
+
+                                if (gasPrice && gasPrice > BigInt(0)) {
+                                    const rawFee = estimatedGas * gasPrice;
+                                    const bufferedFee = (rawFee * BigInt(120)) / BigInt(100);
+                                    requiredBalance = totalCost + bufferedFee;
+                                    break;
+                                }
+                            } catch (feeError) {
+                                console.warn('Failed to fetch fee data before purchase', feeError);
+                            }
+                        }
+                    }
+
+                    let attemptedBalanceCheck = false;
+                    let hasSufficientBalance = false;
+                    let balanceError: unknown = null;
+
+                    for (const balanceProvider of balanceProviders) {
+                        try {
+                            const balance = await balanceProvider.getBalance(address);
+                            attemptedBalanceCheck = true;
+                            if (balance >= requiredBalance) {
+                                hasSufficientBalance = true;
+                                break;
+                            }
+                        } catch (error) {
+                            balanceError = error;
+                        }
+                    }
+
+                    if (!hasSufficientBalance && attemptedBalanceCheck) {
+                        throw new Error(
+                            'Your wallet balance is too low to cover the ticket cost and gas fees. Add more KAIA and try again.',
+                        );
+                    }
+
+                    if (balanceError && !attemptedBalanceCheck) {
+                        console.warn('Failed to preflight wallet balance before purchase', balanceError);
                     }
                 }
 
@@ -819,6 +997,29 @@ export function useLottoContract(): LottoContractContextValue {
 
                 if (gasLimitOverride !== null) {
                     txOverrides.gasLimit = gasLimitOverride;
+                }
+
+                const callStaticModule = contractWithSigner.callStatic as unknown;
+                if (callStaticModule && typeof (callStaticModule as any).buyTickets === 'function') {
+                    const callStaticBuyTickets = (callStaticModule as any).buyTickets as (
+                        ...args: Array<any>
+                    ) => Promise<void>;
+
+                    try {
+                        await callStaticBuyTickets(
+                            numbersPayload,
+                            luckyNumbersPayload,
+                            autoPicksPayload,
+                            tokenUrisPayload,
+                            txOverrides,
+                        );
+                    } catch (staticError) {
+                        throw normalizeContractError(
+                            contractWithSigner,
+                            staticError,
+                            'Failed to submit ticket purchase transaction. Please try again.',
+                        );
+                    }
                 }
 
                 const tx: TransactionResponse = await contractWithSigner.buyTickets(
@@ -841,7 +1042,7 @@ export function useLottoContract(): LottoContractContextValue {
                 );
             }
         },
-        [address, contractWithSigner, readContract, updatePending],
+        [address, contractWithSigner, provider, readContract, updatePending],
     );
 
     const buyTicket = useCallback(
@@ -1124,22 +1325,18 @@ export function useLottoContract(): LottoContractContextValue {
     };
 }
 
-const LottoContractContext = createContext<LottoContractContextValue | undefined>(undefined);
+const LottoContractContext = createContext<LottoContractContextValue | null>(null);
 
-export function useLottoContractContext(): LottoContractContextValue {
+export const LottoContractProvider = ({ children }: { children: ReactNode }) => {
+    const value = useLottoContract();
+
+    return <LottoContractContext.Provider value={value}>{children}</LottoContractContext.Provider>;
+};
+
+export const useLottoContractContext = () => {
     const context = useContext(LottoContractContext);
-
     if (!context) {
         throw new Error('useLottoContractContext must be used within a LottoContractProvider');
     }
-
     return context;
-}
-
-export function LottoContractProvider({ children }: { children: ReactNode }) {
-    const value = useLottoContract();
-
-    return (
-        <LottoContractContext.Provider value={value}>{children}</LottoContractContext.Provider>
-    );
-}
+};
