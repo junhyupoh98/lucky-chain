@@ -170,22 +170,76 @@ const cleanRevertReason = (value: string): string =>
 const isMissingRevertDataMessage = (value: string | null | undefined): boolean =>
     typeof value === 'string' && value.toLowerCase().includes('missing revert data');
 
+const extractErrorName = (error: any): string | null => {
+    if (!error || typeof error !== 'object') {
+        return null;
+    }
+
+    const visited = new Set<any>();
+    const queue: any[] = [error];
+
+    while (queue.length > 0) {
+        const current = queue.shift();
+        if (!current || typeof current !== 'object' || visited.has(current)) {
+            continue;
+        }
+
+        visited.add(current);
+
+        const candidates = [
+            current.errorName,
+            current.value?.errorName,
+            current.value?.error?.name,
+            current.error?.name,
+            current.error?.errorName,
+        ];
+        for (const value of candidates) {
+            if (typeof value === 'string' && value.trim()) {
+                return value.trim();
+            }
+        }
+
+        if (current.cause) {
+            queue.push(current.cause);
+        }
+    }
+
+    return null;
+};
+
 const getRevertData = (error: any): string | null => {
     if (!error || typeof error !== 'object') {
         return null;
     }
 
-    const candidates = [
-        error.data,
-        error.error?.data,
-        error.error?.error?.data,
-        error.info?.error?.data,
-        error.info?.error?.error?.data,
-    ];
+    const visited = new Set<any>();
+    const queue: any[] = [error];
 
-    for (const value of candidates) {
-        if (typeof value === 'string' && value) {
-            return value;
+    while (queue.length > 0) {
+        const current = queue.shift();
+        if (!current || typeof current !== 'object' || visited.has(current)) {
+            continue;
+        }
+
+        visited.add(current);
+
+        const candidates = [
+            current.data,
+            current.error?.data,
+            current.error?.error?.data,
+            current.info?.error?.data,
+            current.info?.error?.error?.data,
+            current.value?.data,
+        ];
+
+        for (const value of candidates) {
+            if (typeof value === 'string' && value) {
+                return value;
+            }
+        }
+
+        if (current.cause) {
+            queue.push(current.cause);
         }
     }
 
@@ -197,17 +251,37 @@ const extractReasonMessage = (error: any): string | null => {
         return null;
     }
 
-    const candidates = [
-        error.shortMessage,
-        error.reason,
-        error.error?.message,
-        error.info?.error?.message,
-        error.message,
-    ];
+    const visited = new Set<any>();
+    const queue: any[] = [error];
 
-    for (const value of candidates) {
-        if (typeof value === 'string' && value.trim()) {
-            return value;
+    while (queue.length > 0) {
+        const current = queue.shift();
+        if (!current || typeof current !== 'object' || visited.has(current)) {
+            continue;
+        }
+
+        visited.add(current);
+
+        const candidates = [
+            current.shortMessage,
+            current.reason,
+            current.error?.message,
+            current.error?.reason,
+            current.info?.error?.message,
+            current.info?.error?.reason,
+            current.value?.message,
+            current.value?.reason,
+            current.message,
+        ];
+
+        for (const value of candidates) {
+            if (typeof value === 'string' && value.trim()) {
+                return value;
+            }
+        }
+
+        if (current.cause) {
+            queue.push(current.cause);
         }
     }
 
@@ -239,6 +313,19 @@ const normalizeContractError = (
                 console.error('Failed to decode contract error', decodeError);
             }
         }
+    }
+
+    const errorName = extractErrorName(error);
+    if (errorName) {
+        const friendly = FRIENDLY_ERROR_MESSAGES[errorName];
+        if (friendly) {
+            const wrapped = new Error(friendly);
+            (wrapped as any).cause = error;
+            return wrapped;
+        }
+        const wrapped = new Error(errorName);
+        (wrapped as any).cause = error;
+        return wrapped;
     }
 
     if (error instanceof Error) {
@@ -696,14 +783,19 @@ export function useLottoContract(): LottoContractContextValue {
                 const estimationContract = readContract ?? contractWithSigner;
                 let gasLimitOverride: bigint | null = null;
 
-                if (estimationContract?.estimateGas?.buyTickets) {
+                const estimateGasModule = estimationContract?.estimateGas as unknown;
+
+                if (estimateGasModule && typeof (estimateGasModule as any).buyTickets === 'function') {
+                    const estimateBuyTickets = (estimateGasModule as any).buyTickets as (
+                        ...args: Array<any>
+                    ) => Promise<bigint>;
                     const estimationOverrides: Record<string, any> = { value: totalCost };
                     if (address) {
                         estimationOverrides.from = address;
                     }
 
                     try {
-                        const estimatedGas: bigint = await estimationContract.estimateGas.buyTickets(
+                        const estimatedGas: bigint = await estimateBuyTickets(
                             numbersPayload,
                             luckyNumbersPayload,
                             autoPicksPayload,
@@ -711,9 +803,10 @@ export function useLottoContract(): LottoContractContextValue {
                             estimationOverrides,
                         );
 
-                        if (estimatedGas > 0n) {
-                            const bufferedGas = (estimatedGas * 120n) / 100n;
-                            gasLimitOverride = bufferedGas > estimatedGas ? bufferedGas : estimatedGas + 1n;
+                        if (estimatedGas > BigInt(0)) {
+                            const bufferedGas = (estimatedGas * BigInt(120)) / BigInt(100);
+                            gasLimitOverride =
+                                bufferedGas > estimatedGas ? bufferedGas : estimatedGas + BigInt(1);
                         }
                     } catch (estimationError) {
                         console.warn('Failed to estimate gas for buyTickets', estimationError);
