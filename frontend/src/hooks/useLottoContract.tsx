@@ -184,6 +184,25 @@ const FRIENDLY_REASON_RULES: FriendlyReasonRule[] = [
 const cleanRevertReason = (value: string): string =>
     value.replace(/^execution reverted:\s*/i, '').trim();
 
+const attachCause = (message: string, cause: unknown): Error => {
+    const wrapped = new Error(message);
+    (wrapped as any).cause = cause;
+    return wrapped;
+};
+
+const parseErrorBody = (value: unknown): any | null => {
+    if (typeof value !== 'string' || !value.trim()) {
+        return null;
+    }
+
+    try {
+        return JSON.parse(value);
+    } catch (error) {
+        console.warn('Failed to parse error body JSON', error);
+        return null;
+    }
+};
+
 const isMissingRevertDataMessage = (value: string | null | undefined): boolean =>
     typeof value === 'string' && value.toLowerCase().includes('missing revert data');
 
@@ -216,8 +235,56 @@ const extractErrorName = (error: any): string | null => {
             }
         }
 
-        if (current.cause) {
-            queue.push(current.cause);
+        const nextNodes = [current.error, current.info?.error, current.value, current.cause];
+        for (const next of nextNodes) {
+            if (next && typeof next === 'object' && !visited.has(next)) {
+                queue.push(next);
+            }
+        }
+    }
+
+    return null;
+};
+
+const extractErrorCode = (error: any): string | number | null => {
+    if (!error || typeof error !== 'object') {
+        return null;
+    }
+
+    const visited = new Set<any>();
+    const queue: any[] = [error];
+
+    while (queue.length > 0) {
+        const current = queue.shift();
+        if (!current || typeof current !== 'object' || visited.has(current)) {
+            continue;
+        }
+
+        visited.add(current);
+
+        const candidates = [
+            current.code,
+            current.error?.code,
+            current.error?.error?.code,
+            current.info?.error?.code,
+            current.info?.error?.error?.code,
+            current.value?.code,
+        ];
+
+        for (const candidate of candidates) {
+            if (
+                (typeof candidate === 'string' && candidate.trim()) ||
+                typeof candidate === 'number'
+            ) {
+                return candidate;
+            }
+        }
+
+        const nextNodes = [current.error, current.info?.error, current.value, current.cause];
+        for (const next of nextNodes) {
+            if (next && typeof next === 'object' && !visited.has(next)) {
+                queue.push(next);
+            }
         }
     }
 
@@ -247,6 +314,9 @@ const getRevertData = (error: any): string | null => {
             current.info?.error?.data,
             current.info?.error?.error?.data,
             current.value?.data,
+            current.data?.data,
+            current.error?.data?.data,
+            current.error?.data?.originalError?.data,
         ];
 
         for (const value of candidates) {
@@ -255,8 +325,36 @@ const getRevertData = (error: any): string | null => {
             }
         }
 
-        if (current.cause) {
-            queue.push(current.cause);
+        const bodyCandidates = [
+            current.body,
+            current.error?.body,
+            current.error?.error?.body,
+            current.info?.error?.body,
+            current.info?.error?.error?.body,
+            current.value?.body,
+        ];
+
+        for (const body of bodyCandidates) {
+            const parsed = parseErrorBody(body);
+            if (parsed) {
+                const bodyCandidatesInner = [
+                    parsed.error?.data,
+                    parsed.error?.data?.data,
+                    parsed.error?.data?.originalError?.data,
+                ];
+                for (const candidate of bodyCandidatesInner) {
+                    if (typeof candidate === 'string' && candidate) {
+                        return candidate;
+                    }
+                }
+            }
+        }
+
+        const nextNodes = [current.error, current.info?.error, current.value, current.cause];
+        for (const next of nextNodes) {
+            if (next && typeof next === 'object' && !visited.has(next)) {
+                queue.push(next);
+            }
         }
     }
 
@@ -297,8 +395,36 @@ const extractReasonMessage = (error: any): string | null => {
             }
         }
 
-        if (current.cause) {
-            queue.push(current.cause);
+        const bodyCandidates = [
+            current.body,
+            current.error?.body,
+            current.error?.error?.body,
+            current.info?.error?.body,
+            current.info?.error?.error?.body,
+            current.value?.body,
+        ];
+
+        for (const body of bodyCandidates) {
+            const parsed = parseErrorBody(body);
+            if (parsed) {
+                const parsedCandidates = [
+                    parsed.error?.message,
+                    parsed.error?.data?.message,
+                    parsed.error?.data?.originalError?.message,
+                ];
+                for (const parsedMessage of parsedCandidates) {
+                    if (typeof parsedMessage === 'string' && parsedMessage.trim()) {
+                        return parsedMessage;
+                    }
+                }
+            }
+        }
+
+        const nextNodes = [current.error, current.info?.error, current.value, current.cause];
+        for (const next of nextNodes) {
+            if (next && typeof next === 'object' && !visited.has(next)) {
+                queue.push(next);
+            }
         }
     }
 
@@ -318,13 +444,9 @@ const normalizeContractError = (
                 if (decoded?.name) {
                     const friendly = FRIENDLY_ERROR_MESSAGES[decoded.name];
                     if (friendly) {
-                        const wrapped = new Error(friendly);
-                        (wrapped as any).cause = error;
-                        return wrapped;
+                        return attachCause(friendly, error);
                     }
-                    const wrapped = new Error(decoded.name);
-                    (wrapped as any).cause = error;
-                    return wrapped;
+                    return attachCause(decoded.name, error);
                 }
             } catch (decodeError) {
                 console.error('Failed to decode contract error', decodeError);
@@ -336,47 +458,46 @@ const normalizeContractError = (
     if (errorName) {
         const friendly = FRIENDLY_ERROR_MESSAGES[errorName];
         if (friendly) {
-            const wrapped = new Error(friendly);
-            (wrapped as any).cause = error;
-            return wrapped;
+            return attachCause(friendly, error);
         }
-        const wrapped = new Error(errorName);
-        (wrapped as any).cause = error;
-        return wrapped;
+        return attachCause(errorName, error);
     }
 
-    if (error instanceof Error) {
-        const normalizedMessage = error.message.toLowerCase();
-        if (normalizedMessage.includes('insufficient funds')) {
-            const wrapped = new Error(
+    const errorCode = extractErrorCode(error);
+    if (
+        errorCode === 'INSUFFICIENT_FUNDS' ||
+        (typeof errorCode === 'number' && errorCode === 100) ||
+        (typeof errorCode === 'string' && errorCode.toLowerCase().includes('insufficient'))
+    ) {
+        return attachCause(
+            'Your wallet balance is too low to cover the ticket cost and gas fees. Add more KAIA and try again.',
+            error,
+        );
+    }
+
+    const reason = extractReasonMessage(error);
+    if (reason && !isMissingRevertDataMessage(reason)) {
+        const cleaned = cleanRevertReason(reason);
+        if (cleaned.toLowerCase().includes('insufficient funds')) {
+            return attachCause(
                 'Your wallet balance is too low to cover the ticket cost and gas fees. Add more KAIA and try again.',
+                error,
             );
-            (wrapped as any).cause = error;
-            return wrapped;
         }
-
-        const reason = extractReasonMessage(error);
-        if (reason && !isMissingRevertDataMessage(reason)) {
-            const cleaned = cleanRevertReason(reason);
-            for (const rule of FRIENDLY_REASON_RULES) {
-                if (rule.match(cleaned)) {
-                    const wrapped = new Error(rule.message);
-                    (wrapped as any).cause = error;
-                    return wrapped;
-                }
+        for (const rule of FRIENDLY_REASON_RULES) {
+            if (rule.match(cleaned)) {
+                return attachCause(rule.message, error);
             }
-
-            const wrapped = new Error(cleaned);
-            (wrapped as any).cause = error;
-            return wrapped;
         }
 
-        if (!isMissingRevertDataMessage(error.message)) {
-            return error;
-        }
+        return attachCause(cleaned, error);
     }
 
-    return new Error(fallbackMessage);
+    if (error instanceof Error && !isMissingRevertDataMessage(error.message)) {
+        return error;
+    }
+
+    return attachCause(fallbackMessage, error);
 };
 
 const mapPhase = (value: bigint | number): RoundPhase => {
@@ -450,7 +571,6 @@ export function useLottoContract(): LottoContractContextValue {
     const resolvedRpcUrl = useMemo(() => getExpectedRpcUrl(), [contractConfig.rpcUrl]);
 
     const staticProvider = useMemo<JsonRpcProvider | null>(() => {
-
         try {
             return new JsonRpcProvider(resolvedRpcUrl);
         } catch (error) {
@@ -1325,18 +1445,22 @@ export function useLottoContract(): LottoContractContextValue {
     };
 }
 
-const LottoContractContext = createContext<LottoContractContextValue | null>(null);
+const LottoContractContext = createContext<LottoContractContextValue | undefined>(undefined);
 
-export const LottoContractProvider = ({ children }: { children: ReactNode }) => {
-    const value = useLottoContract();
-
-    return <LottoContractContext.Provider value={value}>{children}</LottoContractContext.Provider>;
-};
-
-export const useLottoContractContext = () => {
+export function useLottoContractContext(): LottoContractContextValue {
     const context = useContext(LottoContractContext);
+
     if (!context) {
         throw new Error('useLottoContractContext must be used within a LottoContractProvider');
     }
+
     return context;
-};
+}
+
+export function LottoContractProvider({ children }: { children: ReactNode }) {
+    const value = useLottoContract();
+
+    return (
+        <LottoContractContext.Provider value={value}>{children}</LottoContractContext.Provider>
+    );
+}
