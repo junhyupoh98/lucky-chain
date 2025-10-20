@@ -88,6 +88,22 @@ const generateAutoBatch = (count: number): AutoTicketDraft[] => {
     return tickets;
 };
 
+const extractErrorMessage = (error: unknown) => {
+    if (error instanceof Error && typeof error.message === "string") {
+        return error.message;
+    }
+
+    if (typeof error === "string") {
+        return error;
+    }
+
+    try {
+        return JSON.stringify(error);
+    } catch {
+        return "An unexpected error occurred.";
+    }
+};
+
 const describePhase = (phase?: string) => {
     switch (phase) {
         case "sales":
@@ -163,10 +179,12 @@ function LuckyNumberButton({
 
 export default function Home() {
     const {
+        provider,
         address,
         expectedChainId,
         chainId,
         connectWallet,
+        disconnectWallet,
         isConnecting,
         isWrongNetwork,
         switchToExpectedNetwork,
@@ -194,6 +212,7 @@ export default function Home() {
     const [activeRoundId, setActiveRoundId] = useState<number>();
     const [activePhase, setActivePhase] = useState<string>();
     const [autoSeed, setAutoSeed] = useState<number>(Date.now());
+    const [toastMessage, setToastMessage] = useState<string | null>(null);
 
     const currentTicketCount = entryMode === "manual" ? manualTickets.length : autoTickets.length;
     const totalCost = useMemo(() => {
@@ -214,7 +233,7 @@ export default function Home() {
             try {
                 const round = await getActiveRound();
                 if (round) {
-                    setActiveRoundId(Number(round.roundId));
+                    setActiveRoundId(Number(round.id));
                     setActivePhase(round.phase);
                 }
             } catch (error) {
@@ -224,6 +243,20 @@ export default function Home() {
 
         void loadRoundInfo();
     }, [getActiveRound]);
+
+    useEffect(() => {
+        if (!toastMessage) {
+            return;
+        }
+
+        const timeout = window.setTimeout(() => {
+            setToastMessage(null);
+        }, 4000);
+
+        return () => {
+            window.clearTimeout(timeout);
+        };
+    }, [toastMessage]);
 
     useEffect(() => {
         setAutoTickets(generateAutoBatch(autoCount));
@@ -345,6 +378,26 @@ export default function Home() {
         return `${totalCost} KAIA`;
     }, [ticketPrice, totalCost]);
 
+    const handleConnectWallet = async () => {
+        try {
+            setToastMessage(null);
+            await connectWallet();
+        } catch (error) {
+            console.error("Failed to connect wallet", error);
+            setToastMessage(extractErrorMessage(error));
+        }
+    };
+
+    const handleDisconnectWallet = async () => {
+        try {
+            setToastMessage(null);
+            await disconnectWallet();
+        } catch (error) {
+            console.error("Failed to disconnect wallet", error);
+            setToastMessage(extractErrorMessage(error));
+        }
+    };
+
     const handleSubmit = async (event: FormEvent<HTMLFormElement>) => {
         event.preventDefault();
 
@@ -392,19 +445,17 @@ export default function Home() {
 
             setStatus("minting");
 
-            const response = await buyTickets(
-                ticketsToPurchase.map((ticket) => ({
-                    numbers: ticket.numbers,
-                    luckyNumber: ticket.luckyNumber,
-                })),
-                metadataResults.map((result) => result.uri!),
-            );
+            const ticketsWithMetadata = ticketsToPurchase.map((ticket, index) => ({
+                numbers: ticket.numbers,
+                luckyNumber: ticket.luckyNumber,
+                isAutoPick: ticket.isAutoPick,
+                tokenURI: metadataResults[index]?.uri!,
+            }));
 
-            if (response) {
-                const { hash, wait } = response;
-                setTransactionHash(hash);
+            const receipt = await buyTickets(ticketsWithMetadata);
 
-                const receipt = await wait();
+            if (receipt) {
+                setTransactionHash(receipt.hash);
                 const iface = new Interface(lottoAbi);
 
                 const ticketIds: string[] = [];
@@ -419,7 +470,7 @@ export default function Home() {
                             }
                         }
                     } catch (error) {
-                        continue;
+                        console.error("Failed to parse log", error);
                     }
                 }
 
@@ -491,11 +542,19 @@ system
                         {!isWalletAvailable && <p className="text-sm text-red-400">No wallet detected.</p>}
                         <button
                             type="button"
-                            onClick={() => void connectWallet()}
-                            disabled={isConnecting}
+                            onClick={() => void handleConnectWallet()}
+                            disabled={isConnecting || !provider}
                             className="rounded-lg bg-emerald-500 px-4 py-2 text-sm font-semibold text-emerald-950 transition hover:bg-emerald-400 disabled:cursor-not-allowed disabled:opacity-60"
                         >
                             {isConnecting ? "Connecting…" : "Connect wallet"}
+                        </button>
+                        <button
+                            type="button"
+                            onClick={() => void handleDisconnectWallet()}
+                            disabled={!address}
+                            className="rounded-lg border border-slate-700 px-4 py-2 text-sm font-semibold text-slate-200 transition hover:border-red-400 hover:text-red-200 disabled:cursor-not-allowed disabled:opacity-60"
+                        >
+                            Disconnect
                         </button>
                         {isWrongNetwork && (
                             <button
@@ -802,6 +861,11 @@ number.
                     </section>
                 )}
             </div>
+            {toastMessage && (
+                <div className="pointer-events-none fixed right-4 top-4 z-50 max-w-xs rounded-lg border border-red-500/40 bg-red-500/20 px-4 py-3 text-sm text-red-100 shadow-lg">
+                    {toastMessage}
+                </div>
+            )}
         </main>
     );
 }

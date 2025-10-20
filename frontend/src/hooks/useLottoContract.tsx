@@ -7,6 +7,7 @@ import {
     JsonRpcSigner,
     TransactionReceipt,
     TransactionResponse,
+    formatEther,
 } from 'ethers';
 import type { Eip1193Provider } from 'ethers';
 import {
@@ -51,6 +52,19 @@ export type TicketPurchasePayload = {
     tokenURI: string;
 };
 
+export type MetadataUploadTicketPayload = {
+    numbers: number[];
+    luckyNumber: number;
+    address: string;
+    isAutoPick: boolean;
+};
+
+export type MetadataUploadResult = {
+    success: boolean;
+    uri?: string;
+    error?: string;
+};
+
 export type RoundInfo = {
     id: bigint;
     startTime: number;
@@ -82,16 +96,19 @@ export type LottoContractContextValue = {
     isConnecting: boolean;
     isWalletAvailable: boolean;
     pendingTransaction: string | null;
+    ticketPrice: string | null;
     ownerAddress: string | null;
     currentRoundId: bigint | null;
     isAuthorizedOperator: boolean;
     allowedAdminAddresses: string[];
     connectWallet: () => Promise<void>;
+    disconnectWallet: () => Promise<void>;
     switchToExpectedNetwork: () => Promise<void>;
     getTicketPrice: () => Promise<bigint | null>;
     getActiveRound: () => Promise<RoundInfo | null>;
     getRoundInfo: (roundId: number | bigint) => Promise<RoundInfo | null>;
     getTicketData: (ticketId: number | bigint) => Promise<TicketData | null>;
+    uploadMetadata: (tickets: MetadataUploadTicketPayload[]) => Promise<MetadataUploadResult[]>;
     buyTickets: (tickets: TicketPurchasePayload[]) => Promise<TransactionReceipt | null>;
     buyTicket: (
         numbers: Array<number>,
@@ -193,6 +210,7 @@ export function useLottoContract(): LottoContractContextValue {
     const [isWalletAvailable, setIsWalletAvailable] = useState<boolean>(true);
     const [isConnecting, setIsConnecting] = useState<boolean>(false);
     const [pendingTransaction, setPendingTransaction] = useState<string | null>(null);
+    const [ticketPrice, setTicketPrice] = useState<string | null>(null);
 
     const expectedChainId = useMemo(() => getExpectedChainId(), []);
     const expectedChainHex = useMemo(
@@ -247,6 +265,7 @@ export function useLottoContract(): LottoContractContextValue {
                 } else {
                     setSigner(null);
                     setAddress(null);
+                    setPendingTransaction(null);
                 }
             } catch (error) {
                 console.error('Failed to refresh wallet state', error);
@@ -259,6 +278,7 @@ export function useLottoContract(): LottoContractContextValue {
             if (!accounts || accounts.length === 0) {
                 setSigner(null);
                 setAddress(null);
+                setPendingTransaction(null);
                 return;
             }
 
@@ -304,6 +324,31 @@ export function useLottoContract(): LottoContractContextValue {
         } finally {
             setIsConnecting(false);
         }
+    }, [provider]);
+
+    const disconnectWallet = useCallback(async () => {
+        setSigner(null);
+        setAddress(null);
+        setPendingTransaction(null);
+
+        if (!provider) {
+            return;
+        }
+
+        const invoke = async (method: string, params: unknown[]) => {
+            try {
+                await provider.send(method, params);
+            } catch (error: any) {
+                const code = error?.code;
+                if (code === -32601 || code === -32602 || code === 4001 || code === 4100) {
+                    return;
+                }
+                console.warn(`Failed to call ${method} during disconnect`, error);
+            }
+        };
+
+        await invoke('wallet_requestPermissions', []);
+        await invoke('eth_requestAccounts', []);
     }, [provider]);
 
     const isWrongNetwork = useMemo(() => {
@@ -385,6 +430,37 @@ export function useLottoContract(): LottoContractContextValue {
         };
     }, [readContract]);
 
+    useEffect(() => {
+        const contractInstance = readContract ?? contractWithSigner;
+
+        if (!contractInstance) {
+            setTicketPrice(null);
+            return;
+        }
+
+        let cancelled = false;
+
+        const loadTicketPrice = async () => {
+            try {
+                const price: bigint = await contractInstance.ticketPrice();
+                if (!cancelled) {
+                    setTicketPrice(formatEther(price));
+                }
+            } catch (error) {
+                console.error('Failed to load ticket price', error);
+                if (!cancelled) {
+                    setTicketPrice(null);
+                }
+            }
+        };
+
+        void loadTicketPrice();
+
+        return () => {
+            cancelled = true;
+        };
+    }, [contractWithSigner, readContract]);
+
     const getTicketPrice = useCallback(async () => {
         const contractInstance = readContract ?? contractWithSigner;
         if (!contractInstance) {
@@ -393,9 +469,11 @@ export function useLottoContract(): LottoContractContextValue {
 
         try {
             const price: bigint = await contractInstance.ticketPrice();
+            setTicketPrice(formatEther(price));
             return price;
         } catch (error) {
             console.error('Failed to fetch ticket price', error);
+            setTicketPrice(null);
             return null;
         }
     }, [contractWithSigner, readContract]);
@@ -551,6 +629,64 @@ export function useLottoContract(): LottoContractContextValue {
         [readContract],
     );
 
+    const uploadMetadata = useCallback(
+        async (tickets: MetadataUploadTicketPayload[]): Promise<MetadataUploadResult[]> => {
+            if (!Array.isArray(tickets) || tickets.length === 0) {
+                return [];
+            }
+
+            const requestPayload = {
+                tickets: tickets.map((ticket) => ({
+                    numbers: ticket.numbers,
+                    luckyNumber: ticket.luckyNumber,
+                    isAutoPick: ticket.isAutoPick,
+                })),
+                walletAddress: tickets[0]?.address,
+                drawId: currentRoundId ? currentRoundId.toString() : undefined,
+            };
+
+            try {
+                const response = await fetch('/api/uploadMetadata', {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json',
+                    },
+                    body: JSON.stringify(requestPayload),
+                });
+
+                if (!response.ok) {
+                    let message = 'Metadata upload failed.';
+                    try {
+                        const errorBody = await response.json();
+                        if (errorBody?.error && typeof errorBody.error === 'string') {
+                            message = errorBody.error;
+                        }
+                    } catch {
+                        // Ignore JSON parsing errors and use default message.
+                    }
+                    throw new Error(message);
+                }
+
+                const payload = await response.json();
+                const uris: string[] = Array.isArray(payload?.ipfsUris)
+                    ? payload.ipfsUris
+                    : payload?.ipfsUri
+                        ? [payload.ipfsUri]
+                        : [];
+
+                return tickets.map((_, index) => ({
+                    success: Boolean(uris[index]),
+                    uri: uris[index],
+                    error: uris[index] ? undefined : 'Metadata URI missing.',
+                }));
+            } catch (error) {
+                console.error('Failed to upload metadata', error);
+                throw error instanceof Error ? error : new Error('Metadata upload failed.');
+            }
+        },
+        [currentRoundId],
+    );
+
     const getRoundInfo = useCallback(
         async (roundId: number | bigint): Promise<RoundInfo | null> => {
             if (!readContract) {
@@ -703,16 +839,19 @@ export function useLottoContract(): LottoContractContextValue {
         isConnecting,
         isWalletAvailable,
         pendingTransaction,
+        ticketPrice,
         ownerAddress,
         currentRoundId,
         isAuthorizedOperator,
         allowedAdminAddresses,
         connectWallet,
+        disconnectWallet,
         switchToExpectedNetwork,
         getTicketPrice,
         getActiveRound,
         getRoundInfo,
         getTicketData,
+        uploadMetadata,
         buyTickets,
         buyTicket,
         claimPrize,

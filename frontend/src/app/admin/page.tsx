@@ -57,10 +57,12 @@ function formatKaia(value: bigint | null | undefined) {
 
 export default function AdminPage() {
     const {
+        provider,
         address,
         ownerAddress,
         allowedAdminAddresses,
         connectWallet,
+        disconnectWallet,
         isConnecting,
         isWalletAvailable,
         isWrongNetwork,
@@ -83,6 +85,7 @@ export default function AdminPage() {
     const [finalizeRound, setFinalizeRound] = useState('');
     const [nextRoundStart, setNextRoundStart] = useState('');
     const [isLoadingRound, setIsLoadingRound] = useState(false);
+    const [toastMessage, setToastMessage] = useState<string | null>(null);
 
     const normalizedAdmins = useMemo(
         () => allowedAdminAddresses.map((value) => value.toLowerCase()),
@@ -118,6 +121,40 @@ export default function AdminPage() {
             refreshRound();
         }
     }, [isWrongNetwork, refreshRound]);
+
+    useEffect(() => {
+        if (!toastMessage) {
+            return;
+        }
+
+        const timeout = window.setTimeout(() => {
+            setToastMessage(null);
+        }, 4000);
+
+        return () => {
+            window.clearTimeout(timeout);
+        };
+    }, [toastMessage]);
+
+    const handleConnectWallet = async () => {
+        try {
+            setToastMessage(null);
+            await connectWallet();
+        } catch (error) {
+            console.error('Failed to connect wallet', error);
+            setToastMessage(extractErrorMessage(error));
+        }
+    };
+
+    const handleDisconnectWallet = async () => {
+        try {
+            setToastMessage(null);
+            await disconnectWallet();
+        } catch (error) {
+            console.error('Failed to disconnect wallet', error);
+            setToastMessage(extractErrorMessage(error));
+        }
+    };
 
     const handleCloseRound = async () => {
         try {
@@ -268,11 +305,19 @@ export default function AdminPage() {
                         )}
                         <button
                             type="button"
-                            onClick={() => void connectWallet()}
-                            disabled={isConnecting}
+                            onClick={() => void handleConnectWallet()}
+                            disabled={isConnecting || !provider}
                             className="rounded-lg bg-emerald-500 px-4 py-2 text-sm font-semibold text-emerald-950 transition hover:bg-emerald-400 disabled:cursor-not-allowed disabled:opacity-60"
                         >
                             {isConnecting ? 'Connecting…' : 'Connect wallet'}
+                        </button>
+                        <button
+                            type="button"
+                            onClick={() => void handleDisconnectWallet()}
+                            disabled={!address}
+                            className="rounded-lg border border-slate-700 px-4 py-2 text-sm font-semibold text-slate-200 transition hover:border-red-400 hover:text-red-200 disabled:cursor-not-allowed disabled:opacity-60"
+                        >
+                            Disconnect
                         </button>
                         {isWrongNetwork && (
                             <button
@@ -459,6 +504,11 @@ export default function AdminPage() {
                     </div>
                 </section>
             </div>
+            {toastMessage && (
+                <div className="pointer-events-none fixed right-4 top-4 z-50 max-w-xs rounded-lg border border-red-500/40 bg-red-500/20 px-4 py-3 text-sm text-red-100 shadow-lg">
+                    {toastMessage}
+                </div>
+            )}
         </main>
     );
 }
