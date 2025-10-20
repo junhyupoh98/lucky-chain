@@ -21,20 +21,47 @@ type TicketDraft = {
     luckyNumber: number | null;
 };
 
-function generateUniqueNumbers(): { numbers: number[]; lucky: number } {
+type AutoTicketDraft = {
+    numbers: number[];
+    luckyNumber: number;
+    signature: string;
+};
+
+const createSignature = (numbers: number[], luckyNumber: number) =>
+    `${numbers.join('-')}|${luckyNumber}`;
+
+function generateTicketCombination(existingSignatures: Set<string>): AutoTicketDraft {
     const picks = new Set<number>();
     while (picks.size < NUMBER_OF_PICKS) {
         const value = Math.floor(Math.random() * MAX_NUMBER) + MIN_NUMBER;
         picks.add(value);
     }
-    const main = Array.from(picks).sort((a, b) => a - b);
+    const numbers = Array.from(picks).sort((a, b) => a - b);
 
-    let lucky = Math.floor(Math.random() * MAX_NUMBER) + MIN_NUMBER;
-    while (picks.has(lucky)) {
-        lucky = Math.floor(Math.random() * MAX_NUMBER) + MIN_NUMBER;
+    let luckyNumber = Math.floor(Math.random() * MAX_NUMBER) + MIN_NUMBER;
+    while (picks.has(luckyNumber)) {
+        luckyNumber = Math.floor(Math.random() * MAX_NUMBER) + MIN_NUMBER;
     }
 
-    return { numbers: main, lucky };
+    const signature = createSignature(numbers, luckyNumber);
+    if (existingSignatures.has(signature)) {
+        return generateTicketCombination(existingSignatures);
+    }
+
+    existingSignatures.add(signature);
+    return { numbers, luckyNumber, signature };
+}
+
+function generateTicketBatch(count: number): AutoTicketDraft[] {
+    const sanitizedCount = Math.min(Math.max(count, 1), MAX_TICKETS_PER_PURCHASE);
+    const signatures = new Set<string>();
+    const tickets: AutoTicketDraft[] = [];
+
+    while (tickets.length < sanitizedCount) {
+        tickets.push(generateTicketCombination(signatures));
+    }
+
+    return tickets;
 }
 
 function createTicketDraft(): TicketDraft {
@@ -83,7 +110,8 @@ export default function Home() {
 
     const [mode, setMode] = useState<EntryMode>('manual');
     const [manualTickets, setManualTickets] = useState<TicketDraft[]>([createTicketDraft()]);
-    const [autoNumbers, setAutoNumbers] = useState(() => generateUniqueNumbers());
+    const [autoTicketCount, setAutoTicketCount] = useState<number>(5);
+    const [autoTickets, setAutoTickets] = useState<AutoTicketDraft[]>(() => generateTicketBatch(5));
     const [status, setStatus] = useState<SubmissionStatus>('idle');
     const [errorMessage, setErrorMessage] = useState<string | null>(null);
     const [successTokenIds, setSuccessTokenIds] = useState<string[]>([]);
@@ -96,6 +124,11 @@ export default function Home() {
     const lottoInterface = useMemo(() => new Interface(lottoAbi), []);
     const numberOptions = useMemo(
         () => Array.from({ length: MAX_NUMBER }, (_, index) => index + 1),
+        [],
+    );
+
+    const autoTicketCountOptions = useMemo(
+        () => Array.from({ length: MAX_TICKETS_PER_PURCHASE }, (_, index) => index + 1),
         [],
     );
 
@@ -134,8 +167,18 @@ export default function Home() {
         };
     }, [getActiveRound, getTicketPrice, isWrongNetwork]);
 
-    const regenerateAutoNumbers = () => {
-        setAutoNumbers(generateUniqueNumbers());
+    useEffect(() => {
+        setAutoTickets(generateTicketBatch(autoTicketCount));
+    }, [autoTicketCount]);
+
+    const regenerateAutoTickets = () => {
+        setAutoTickets(generateTicketBatch(autoTicketCount));
+    };
+
+    const handleAutoTicketCountChange = (value: number) => {
+        const sanitized = Number.isFinite(value) ? Math.trunc(value) : 1;
+        const clamped = Math.min(Math.max(sanitized, 1), MAX_TICKETS_PER_PURCHASE);
+        setAutoTicketCount(clamped);
     };
 
     const addManualTicket = () => {
@@ -335,13 +378,11 @@ export default function Home() {
                 isAutoPick: false,
             }));
         } else {
-            ticketDrafts = [
-                {
-                    numbers: autoNumbers.numbers,
-                    luckyNumber: autoNumbers.lucky,
-                    isAutoPick: true,
-                },
-            ];
+            ticketDrafts = autoTickets.map((ticket) => ({
+                numbers: [...ticket.numbers],
+                luckyNumber: ticket.luckyNumber,
+                isAutoPick: true,
+            }));
         }
 
         try {
@@ -358,7 +399,7 @@ export default function Home() {
                         isAutoPick: ticket.isAutoPick,
                     })),
                     drawId: activeRoundId,
-                    walletAddress: address
+                    walletAddress: address,
                 }),
             });
 
@@ -388,6 +429,9 @@ export default function Home() {
             }));
 
             setStatus('minting');
+            if (mode === 'auto') {
+                regenerateAutoTickets();
+            }
             const receipt = await buyTickets(ticketsWithMetadata);
             if (!receipt) {
                 throw new Error('Transaction could not be confirmed.');
@@ -617,23 +661,72 @@ export default function Home() {
                             </div>
                         </div>
                     ) : (
-                        <div className="mt-4 space-y-4">
-                            <div className="flex items-center justify-between">
+                        <div className="mt-4 space-y-5">
+                            <div className="flex flex-col gap-3 sm:flex-row sm:items-end sm:justify-between">
                                 <div>
                                     <h3 className="text-sm font-semibold text-slate-300">Auto-generated numbers</h3>
-                                    <p className="text-xs text-slate-500">Unique numbers 1–45 with a bonus lucky number.</p>
+                                    <p className="text-xs text-slate-500">
+                                        Unique numbers 1–45 with a bonus lucky number. Choose how many tickets to auto-pick.
+                                    </p>
                                 </div>
-                                <button
-                                    type="button"
-                                    onClick={regenerateAutoNumbers}
-                                    className="rounded-lg border border-slate-700 px-3 py-1 text-xs font-semibold text-slate-200 transition hover:border-emerald-400"
-                                >
-                                    Regenerate
-                                </button>
+                                <div className="flex flex-col gap-2 text-xs sm:flex-row sm:items-center">
+                                    <label className="flex items-center gap-2 font-semibold text-slate-300">
+                                        Tickets
+                                        <select
+                                            value={autoTicketCount}
+                                            onChange={(event) =>
+                                                handleAutoTicketCountChange(Number(event.target.value))
+                                            }
+                                            className="rounded-md border border-slate-700 bg-slate-950 px-2 py-1 font-semibold text-slate-100 shadow-sm transition hover:border-emerald-400 focus:border-emerald-400 focus:outline-none"
+                                        >
+                                            {autoTicketCountOptions.map((count) => (
+                                                <option key={count} value={count}>
+                                                    {count}
+                                                </option>
+                                            ))}
+                                        </select>
+                                    </label>
+                                    <button
+                                        type="button"
+                                        onClick={regenerateAutoTickets}
+                                        className="w-full rounded-md border border-emerald-400 px-3 py-1 text-xs font-semibold text-emerald-200 transition hover:bg-emerald-500/10 sm:w-auto"
+                                    >
+                                        Regenerate batch
+                                    </button>
+                                </div>
                             </div>
-                            <div className="rounded-lg border border-slate-800 bg-slate-950/60 p-4 text-lg font-semibold tracking-wide text-emerald-300">
-                                {autoNumbers.numbers.join('  ')}
-                                <span className="ml-3 text-sm text-emerald-200">Lucky {autoNumbers.lucky}</span>
+                            <div className="grid gap-3 sm:grid-cols-2">
+                                {autoTickets.map((ticket, index) => (
+                                    <div
+                                        key={ticket.signature}
+                                        className="group rounded-xl border border-slate-800 bg-slate-950/60 p-4 transition hover:border-emerald-400/80 hover:bg-slate-900/70"
+                                    >
+                                        <div className="flex items-center justify-between text-xs text-slate-400">
+                                            <span className="font-semibold uppercase tracking-wide text-slate-500">
+                                                Ticket {index + 1}
+                                            </span>
+                                            <span className="rounded-full border border-emerald-400/40 bg-emerald-500/10 px-2 py-0.5 text-[11px] font-semibold uppercase tracking-wide text-emerald-200 transition group-hover:border-emerald-300 group-hover:bg-emerald-500/20">
+                                                Auto pick
+                                            </span>
+                                        </div>
+                                        <div className="mt-3 flex flex-wrap gap-2">
+                                            {ticket.numbers.map((value) => (
+                                                <span
+                                                    key={`${ticket.signature}-${value}`}
+                                                    className="rounded-md border border-emerald-500/20 bg-emerald-500/5 px-2.5 py-1 text-sm font-semibold text-emerald-200 shadow-inner shadow-emerald-500/10 transition group-hover:border-emerald-400 group-hover:bg-emerald-500/10"
+                                                >
+                                                    {value}
+                                                </span>
+                                            ))}
+                                        </div>
+                                        <div className="mt-4 flex items-center gap-3 border-t border-slate-800 pt-3">
+                                            <span className="text-xs uppercase tracking-wide text-amber-300/70">Lucky</span>
+                                            <span className="rounded-md border border-amber-400/40 bg-amber-500/10 px-2.5 py-1 text-sm font-semibold text-amber-200 shadow-inner shadow-amber-500/20 transition group-hover:border-amber-300 group-hover:bg-amber-500/20">
+                                                {ticket.luckyNumber}
+                                            </span>
+                                        </div>
+                                    </div>
+                                ))}
                             </div>
                         </div>
                     )}
