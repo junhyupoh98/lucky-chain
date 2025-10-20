@@ -695,14 +695,47 @@ export function useLottoContract(): LottoContractContextValue {
                 const autoPicksPayload = normalizedTickets.map((ticket) => ticket.isAutoPick);
                 const tokenUrisPayload = normalizedTickets.map((ticket) => ticket.tokenURI);
 
+                const estimationContract = readContract ?? contractWithSigner;
+                let gasLimitOverride: bigint | null = null;
+
+                if (estimationContract?.estimateGas?.buyTickets) {
+                    const estimationOverrides: Record<string, any> = { value: totalCost };
+                    if (address) {
+                        estimationOverrides.from = address;
+                    }
+
+                    try {
+                        const estimatedGas: bigint = await estimationContract.estimateGas.buyTickets(
+                            numbersPayload,
+                            luckyNumbersPayload,
+                            autoPicksPayload,
+                            tokenUrisPayload,
+                            estimationOverrides,
+                        );
+
+                        if (estimatedGas > 0n) {
+                            const bufferedGas = (estimatedGas * 120n) / 100n;
+                            gasLimitOverride = bufferedGas > estimatedGas ? bufferedGas : estimatedGas + 1n;
+                        }
+                    } catch (estimationError) {
+                        console.warn('Failed to estimate gas for buyTickets', estimationError);
+                    }
+                }
+
+                const txOverrides: Record<string, any> = {
+                    value: totalCost,
+                };
+
+                if (gasLimitOverride !== null) {
+                    txOverrides.gasLimit = gasLimitOverride;
+                }
+
                 const tx: TransactionResponse = await contractWithSigner.buyTickets(
                     numbersPayload,
                     luckyNumbersPayload,
                     autoPicksPayload,
                     tokenUrisPayload,
-                    {
-                        value: totalCost,
-                    },
+                    txOverrides,
                 );
                 updatePending(tx.hash);
                 const receipt = await tx.wait();
@@ -710,10 +743,14 @@ export function useLottoContract(): LottoContractContextValue {
                 return receipt ?? null;
             } catch (error) {
                 updatePending(null);
-                throw error;
+                throw normalizeContractError(
+                    contractWithSigner,
+                    error,
+                    'Failed to submit ticket purchase transaction. Please try again.',
+                );
             }
         },
-        [contractWithSigner, updatePending],
+        [address, contractWithSigner, readContract, updatePending],
     );
 
     const buyTicket = useCallback(
