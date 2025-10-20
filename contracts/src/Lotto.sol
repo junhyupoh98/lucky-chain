@@ -401,14 +401,14 @@ contract Lotto is ERC721URIStorage, Ownable, VRFConsumerBaseV2 {
     }
 
     function _sort(uint8[MAIN_NUMBERS] memory data) internal pure {
-        for (uint256 i = 0; i < MAIN_NUMBERS; i++) {
-            for (uint256 j = i + 1; j < MAIN_NUMBERS; j++) {
-                if (data[i] > data[j]) {
-                    uint8 tmp = data[i];
-                    data[i] = data[j];
-                    data[j] = tmp;
-                }
+        for (uint256 i = 1; i < MAIN_NUMBERS; i++) {
+            uint8 key = data[i];
+            uint256 j = i;
+            while (j > 0 && data[j - 1] > key) {
+                data[j] = data[j - 1];
+                j--;
             }
+            data[j] = key;
         }
     }
 
