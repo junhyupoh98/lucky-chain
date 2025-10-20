@@ -140,10 +140,10 @@ const mapPhase = (value: bigint | number): RoundPhase => {
 };
 
 const roundInfoFromContract = (payload: any): RoundInfo => {
-    const rawWinningNumbers = Array.from(payload.winningNumbers ?? []);
+    const rawWinningNumbers = Array.from(payload.winningNumbers ?? []) as Array<bigint | number>;
     const normalizedWinningNumbers = rawWinningNumbers
-        .map((value: bigint | number) => Number(value))
-        .filter((value: number) => Number.isFinite(value) && value > 0);
+        .map((value) => Number(value))
+        .filter((value) => Number.isFinite(value) && value > 0);
 
     const luckyValue = payload.luckyNumber ? Number(payload.luckyNumber) : null;
 
@@ -168,16 +168,20 @@ const roundInfoFromContract = (payload: any): RoundInfo => {
     };
 };
 
-const ticketInfoFromContract = (payload: any): TicketData => ({
-    id: BigInt(payload.ticketId ?? 0n).toString(),
-    roundId: BigInt(payload.roundId ?? 0n).toString(),
-    purchasedAt: Number(payload.purchasedAt ?? 0),
-    numbers: Array.from(payload.numbers ?? []).map((value: bigint | number) => Number(value)),
-    luckyNumber: Number(payload.luckyNumber ?? 0),
-    isAutoPick: Boolean(payload.isAutoPick ?? false),
-    tier: Number(payload.tier ?? 0),
-    claimed: Boolean(payload.claimed ?? false),
-});
+const ticketInfoFromContract = (payload: any): TicketData => {
+    const numbersArray = Array.from(payload.numbers ?? []) as Array<bigint | number>;
+
+    return {
+        id: BigInt(payload.ticketId ?? 0).toString(),
+        roundId: BigInt(payload.roundId ?? 0).toString(),
+        purchasedAt: Number(payload.purchasedAt ?? 0),
+        numbers: numbersArray.map((value) => Number(value)),
+        luckyNumber: Number(payload.luckyNumber ?? 0),
+        isAutoPick: Boolean(payload.isAutoPick ?? false),
+        tier: Number(payload.tier ?? 0),
+        claimed: Boolean(payload.claimed ?? false),
+    };
+};
 
 export function useLottoContract(): LottoContractContextValue {
     const [provider, setProvider] = useState<BrowserProvider | null>(null);
@@ -571,7 +575,7 @@ export function useLottoContract(): LottoContractContextValue {
 
         try {
             const roundId: bigint = await readContract.currentRoundId();
-            if (roundId === 0n) {
+            if (roundId === BigInt(0)) {
                 return null;
             }
             const response = await readContract.getRoundInfo(roundId);
@@ -601,7 +605,7 @@ export function useLottoContract(): LottoContractContextValue {
             const contractInstance = requireAuthorizedSigner();
 
             try {
-                const args = startTime ? [BigInt(startTime)] : [0n];
+                const args = startTime ? [BigInt(startTime)] : [BigInt(0)];
                 const tx: TransactionResponse = await contractInstance.startNextRound(...args);
                 updatePending(tx.hash);
                 const receipt = await tx.wait();
