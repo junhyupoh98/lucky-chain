@@ -1,6 +1,7 @@
 'use client';
 
 import {
+    AbiCoder,
     BrowserProvider,
     Contract,
     JsonRpcProvider,
@@ -143,7 +144,9 @@ const getExpectedChainId = () => {
 
 const getExpectedRpcUrl = () => contractConfig.rpcUrl ?? DEFAULT_RPC_URL;
 const CONTRACT_ADDRESS = contractConfig.address;
-const allowedAdminAddresses = staticAllowedAdmins ?? [];
+const allowedAdminAddresses = (staticAllowedAdmins ?? [])
+    .map((value) => (typeof value === 'string' ? value.toLowerCase() : ''))
+    .filter((value) => value);
 
 const normalizeAddress = (value: string | null | undefined) =>
     (value ? value.toLowerCase() : null);
@@ -190,6 +193,91 @@ const attachCause = (message: string, cause: unknown): Error => {
     return wrapped;
 };
 
+const PANIC_MESSAGES: Record<number, string> = {
+    0x01: 'Panic: generic assertion failed.',
+    0x11: 'Panic: arithmetic overflow or underflow.',
+    0x12: 'Panic: division or modulo by zero.',
+    0x21: 'Panic: invalid enum value.',
+    0x22: 'Panic: incorrect storage byte array access.',
+    0x31: 'Panic: pop on empty array.',
+    0x32: 'Panic: array index out of bounds.',
+    0x41: 'Panic: allocation too large or out of memory.',
+    0x51: 'Panic: call to uninitialized function.',
+};
+
+const decodeRevertReason = (data: string): string | null => {
+    if (typeof data !== 'string' || data.length === 0) {
+        return null;
+    }
+
+    const normalized = data.startsWith('0x') ? data.slice(2) : data;
+    if (normalized.length < 8) {
+        return null;
+    }
+
+    const selector = normalized.slice(0, 8).toLowerCase();
+    const payload = `0x${normalized.slice(8)}`;
+
+    if (selector === '08c379a0') {
+        try {
+            const [reason] = AbiCoder.defaultAbiCoder().decode(['string'], payload);
+            if (typeof reason === 'string' && reason.trim()) {
+                return reason;
+            }
+        } catch (error) {
+            console.warn('Failed to decode standard revert reason', error);
+        }
+        return null;
+    }
+
+    if (selector === '4e487b71') {
+        try {
+            const [panicCodeBigInt] = AbiCoder.defaultAbiCoder().decode(['uint256'], payload);
+            const panicCode = Number(panicCodeBigInt);
+            if (Number.isFinite(panicCode)) {
+                const friendly = PANIC_MESSAGES[panicCode];
+                if (friendly) {
+                    return friendly;
+                }
+                return `Solidity panic (0x${panicCode.toString(16)}) triggered.`;
+            }
+        } catch (error) {
+            console.warn('Failed to decode panic code', error);
+        }
+        return null;
+    }
+
+    return null;
+};
+
+const createReasonError = (reason: string | null | undefined, cause: unknown): Error | null => {
+    if (!reason || !reason.trim()) {
+        return null;
+    }
+
+    const cleaned = cleanRevertReason(reason);
+    if (!cleaned) {
+        return null;
+    }
+
+    const normalized = cleaned.toLowerCase();
+
+    if (normalized.includes('insufficient funds')) {
+        return attachCause(
+            'Your wallet balance is too low to cover the ticket cost and gas fees. Add more KAIA and try again.',
+            cause,
+        );
+    }
+
+    for (const rule of FRIENDLY_REASON_RULES) {
+        if (rule.match(cleaned)) {
+            return attachCause(rule.message, cause);
+        }
+    }
+
+    return attachCause(cleaned, cause);
+};
+
 const parseErrorBody = (value: unknown): any | null => {
     if (typeof value !== 'string' || !value.trim()) {
         return null;
@@ -228,6 +316,10 @@ const extractErrorName = (error: any): string | null => {
             current.value?.error?.name,
             current.error?.name,
             current.error?.errorName,
+            current.data?.errorName,
+            current.error?.data?.errorName,
+            current.info?.error?.data?.errorName,
+            current.value?.data?.errorName,
         ];
         for (const value of candidates) {
             if (typeof value === 'string' && value.trim()) {
@@ -235,7 +327,13 @@ const extractErrorName = (error: any): string | null => {
             }
         }
 
-        const nextNodes = [current.error, current.info?.error, current.value, current.cause];
+        const nextNodes = [
+            current.error,
+            current.info?.error,
+            current.value,
+            current.cause,
+            current.data,
+        ];
         for (const next of nextNodes) {
             if (next && typeof next === 'object' && !visited.has(next)) {
                 queue.push(next);
@@ -269,6 +367,10 @@ const extractErrorCode = (error: any): string | number | null => {
             current.info?.error?.code,
             current.info?.error?.error?.code,
             current.value?.code,
+            current.data?.code,
+            current.error?.data?.code,
+            current.info?.error?.data?.code,
+            current.value?.data?.code,
         ];
 
         for (const candidate of candidates) {
@@ -280,7 +382,19 @@ const extractErrorCode = (error: any): string | number | null => {
             }
         }
 
-        const nextNodes = [current.error, current.info?.error, current.value, current.cause];
+        const nextNodes = [
+            current.error,
+            current.error?.error,
+            current.info?.error,
+            current.info?.error?.error,
+            current.value,
+            current.value?.error,
+            current.cause,
+            current.data,
+            current.error?.data,
+            current.info?.error?.data,
+            current.value?.data,
+        ];
         for (const next of nextNodes) {
             if (next && typeof next === 'object' && !visited.has(next)) {
                 queue.push(next);
@@ -315,8 +429,11 @@ const getRevertData = (error: any): string | null => {
             current.info?.error?.error?.data,
             current.value?.data,
             current.data?.data,
+            current.data?.originalError?.data,
             current.error?.data?.data,
             current.error?.data?.originalError?.data,
+            current.error?.error?.data?.data,
+            current.error?.error?.data?.originalError?.data,
         ];
 
         for (const value of candidates) {
@@ -350,7 +467,21 @@ const getRevertData = (error: any): string | null => {
             }
         }
 
-        const nextNodes = [current.error, current.info?.error, current.value, current.cause];
+        const nextNodes = [
+            current.error,
+            current.error?.error,
+            current.info?.error,
+            current.info?.error?.error,
+            current.value,
+            current.value?.error,
+            current.cause,
+            current.data,
+            current.error?.data,
+            current.info?.error?.data,
+            current.value?.data,
+            current.data?.originalError,
+            current.error?.data?.originalError,
+        ];
         for (const next of nextNodes) {
             if (next && typeof next === 'object' && !visited.has(next)) {
                 queue.push(next);
@@ -387,6 +518,14 @@ const extractReasonMessage = (error: any): string | null => {
             current.value?.message,
             current.value?.reason,
             current.message,
+            current.data?.message,
+            current.data?.reason,
+            current.error?.data?.message,
+            current.error?.data?.reason,
+            current.info?.error?.data?.message,
+            current.info?.error?.data?.reason,
+            current.value?.data?.message,
+            current.value?.data?.reason,
         ];
 
         for (const value of candidates) {
@@ -420,7 +559,19 @@ const extractReasonMessage = (error: any): string | null => {
             }
         }
 
-        const nextNodes = [current.error, current.info?.error, current.value, current.cause];
+        const nextNodes = [
+            current.error,
+            current.error?.error,
+            current.info?.error,
+            current.info?.error?.error,
+            current.value,
+            current.value?.error,
+            current.cause,
+            current.data,
+            current.error?.data,
+            current.info?.error?.data,
+            current.value?.data,
+        ];
         for (const next of nextNodes) {
             if (next && typeof next === 'object' && !visited.has(next)) {
                 queue.push(next);
@@ -451,6 +602,12 @@ const normalizeContractError = (
             } catch (decodeError) {
                 console.error('Failed to decode contract error', decodeError);
             }
+
+            const decodedReason = decodeRevertReason(revertData);
+            const reasonError = createReasonError(decodedReason, error);
+            if (reasonError) {
+                return reasonError;
+            }
         }
     }
 
@@ -477,20 +634,10 @@ const normalizeContractError = (
 
     const reason = extractReasonMessage(error);
     if (reason && !isMissingRevertDataMessage(reason)) {
-        const cleaned = cleanRevertReason(reason);
-        if (cleaned.toLowerCase().includes('insufficient funds')) {
-            return attachCause(
-                'Your wallet balance is too low to cover the ticket cost and gas fees. Add more KAIA and try again.',
-                error,
-            );
+        const reasonError = createReasonError(reason, error);
+        if (reasonError) {
+            return reasonError;
         }
-        for (const rule of FRIENDLY_REASON_RULES) {
-            if (rule.match(cleaned)) {
-                return attachCause(rule.message, error);
-            }
-        }
-
-        return attachCause(cleaned, error);
     }
 
     if (error instanceof Error && !isMissingRevertDataMessage(error.message)) {
@@ -571,6 +718,7 @@ export function useLottoContract(): LottoContractContextValue {
     const resolvedRpcUrl = useMemo(() => getExpectedRpcUrl(), [contractConfig.rpcUrl]);
 
     const staticProvider = useMemo<JsonRpcProvider | null>(() => {
+
         try {
             return new JsonRpcProvider(resolvedRpcUrl);
         } catch (error) {
