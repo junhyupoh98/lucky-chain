@@ -19,6 +19,8 @@ contract Lotto is ERC721URIStorage, Ownable, VRFConsumerBaseV2 {
     uint8 public constant MAX_NUMBER = 45;
     uint256 public ticketPrice;
 
+    uint256 public constant MAX_TICKETS_PER_PURCHASE = 50;
+
     uint256 public nextTicketId;
     
         uint256 public currentRoundId;
@@ -131,6 +133,8 @@ contract Lotto is ERC721URIStorage, Ownable, VRFConsumerBaseV2 {
     error PayoutsNotReady();
     error NoPrize();
     error AlreadyFinalized();
+    error TooManyTickets();
+    error InvalidBatchLength();
 
     constructor(
         address vrfCoordinator,
@@ -238,27 +242,82 @@ contract Lotto is ERC721URIStorage, Ownable, VRFConsumerBaseV2 {
         Round storage roundData = rounds[currentRoundId];
         if (roundData.phase != Phase.Sales) revert WrongPhase();
         require(block.timestamp >= roundData.startTime && block.timestamp <= roundData.endTime, "Sales window closed");
-        require(msg.value == ticketPrice, "Incorrect payment");
+        uint8[MAIN_NUMBERS][] memory batchNumbers = new uint8[MAIN_NUMBERS][](1);
+        batchNumbers[0] = numbers;
+        uint8[] memory luckyNumbers = new uint8[](1);
+        luckyNumbers[0] = luckyNumber;
+        bool[] memory autoPicks = new bool[](1);
+        autoPicks[0] = isAutoPick;
+        string[] memory tokenURIs = new string[](1);
+        tokenURIs[0] = tokenURI;
 
-        _validateNumbers(numbers, luckyNumber);
+        _buyTicketsInternal(roundData, batchNumbers, luckyNumbers, autoPicks, tokenURIs, msg.value);
+    }
 
-        uint256 tokenId = nextTicketId;
-        nextTicketId = tokenId + 1;
+    function buyTickets(
+        uint8[MAIN_NUMBERS][] calldata numbersList,
+        uint8[] calldata luckyNumbers,
+        bool[] calldata autoPicks,
+        string[] calldata tokenURIs
+    ) external payable {
+        Round storage roundData = rounds[currentRoundId];
+        if (roundData.phase != Phase.Sales) revert WrongPhase();
+        require(block.timestamp >= roundData.startTime && block.timestamp <= roundData.endTime, "Sales window closed");
 
-        _ticketNumbers[tokenId] = numbers;
-        ticketLuckyNumber[tokenId] = luckyNumber;
-        ticketAutoPick[tokenId] = isAutoPick;
-        purchaseTimestamps[tokenId] = uint64(block.timestamp);
-        ticketToRound[tokenId] = currentRoundId;
+        uint256 count = numbersList.length;
+        if (count == 0) revert InvalidBatchLength();
+        if (count > MAX_TICKETS_PER_PURCHASE) revert TooManyTickets();
+        if (luckyNumbers.length != count || autoPicks.length != count || tokenURIs.length != count) {
+            revert InvalidBatchLength();
+        }
 
-        _roundTickets[currentRoundId].push(tokenId);
-        roundData.ticketCount += 1;
-        roundData.gross += msg.value;
+        uint8[MAIN_NUMBERS][] memory numbersCopy = new uint8[MAIN_NUMBERS][](count);
+        for (uint256 i = 0; i < count; i++) {
+            numbersCopy[i] = numbersList[i];
+        }
 
-        _safeMint(msg.sender, tokenId);
-        _setTokenURI(tokenId, tokenURI);
+        _buyTicketsInternal(roundData, numbersCopy, luckyNumbers, autoPicks, tokenURIs, msg.value);
+    }
 
-        emit TicketPurchased(msg.sender, tokenId, currentRoundId, numbers, luckyNumber, isAutoPick);
+    function _buyTicketsInternal(
+        Round storage roundData,
+        uint8[MAIN_NUMBERS][] memory numbersList,
+        uint8[] memory luckyNumbers,
+        bool[] memory autoPicks,
+        string[] memory tokenURIs,
+        uint256 totalPayment
+    ) internal {
+        uint256 count = numbersList.length;
+        uint256 expectedPayment = ticketPrice * count;
+        require(totalPayment == expectedPayment, "Incorrect payment");
+        uint256 startingId = nextTicketId;
+        uint256 currentRound = currentRoundId;
+
+        for (uint256 i = 0; i < count; i++) {
+            uint8[MAIN_NUMBERS] memory numbers = numbersList[i];
+            uint8 luckyNumber = luckyNumbers[i];
+            bool isAutoPick = autoPicks[i];
+
+            _validateNumbers(numbers, luckyNumber);
+
+            uint256 tokenId = startingId + i;
+            _ticketNumbers[tokenId] = numbers;
+            ticketLuckyNumber[tokenId] = luckyNumber;
+            ticketAutoPick[tokenId] = isAutoPick;
+            purchaseTimestamps[tokenId] = uint64(block.timestamp);
+            ticketToRound[tokenId] = currentRound;
+
+            _roundTickets[currentRound].push(tokenId);
+
+            _safeMint(msg.sender, tokenId);
+            _setTokenURI(tokenId, tokenURIs[i]);
+
+            emit TicketPurchased(msg.sender, tokenId, currentRound, numbers, luckyNumber, isAutoPick);
+        }
+
+        nextTicketId = startingId + count;
+        roundData.ticketCount += count;
+        roundData.gross += totalPayment;
     }
 
     function _validateNumbers(uint8[MAIN_NUMBERS] memory numbers, uint8 luckyNumber) internal pure {

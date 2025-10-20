@@ -258,6 +258,19 @@
     },
     {
         "type": "function",
+        "name": "MAX_TICKETS_PER_PURCHASE",
+        "inputs": [],
+        "outputs": [
+            {
+                "internalType": "uint256",
+                "name": "",
+                "type": "uint256"
+            }
+        ],
+        "stateMutability": "view"
+    },
+    {
+        "type": "function",
         "name": "setTicketPrice",
         "inputs": [
             {
@@ -359,6 +372,34 @@
                 "internalType": "string",
                 "name": "tokenURI",
                 "type": "string"
+            }
+        ],
+        "outputs": [],
+        "stateMutability": "payable"
+    },
+    {
+        "type": "function",
+        "name": "buyTickets",
+        "inputs": [
+            {
+                "internalType": "uint8[6][]",
+                "name": "numbersList",
+                "type": "uint8[6][]"
+            },
+            {
+                "internalType": "uint8[]",
+                "name": "luckyNumbers",
+                "type": "uint8[]"
+            },
+            {
+                "internalType": "bool[]",
+                "name": "autoPicks",
+                "type": "bool[]"
+            },
+            {
+                "internalType": "string[]",
+                "name": "tokenURIs",
+                "type": "string[]"
             }
         ],
         "outputs": [],

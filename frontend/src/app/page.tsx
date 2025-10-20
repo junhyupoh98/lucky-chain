@@ -10,13 +10,15 @@ import type { TicketData } from '@/hooks/useLottoContract';
 const NUMBER_OF_PICKS = 6;
 const MIN_NUMBER = 1;
 const MAX_NUMBER = 45;
+const MAX_TICKETS_PER_PURCHASE = 50;
 
 type SubmissionStatus = 'idle' | 'uploading' | 'minting' | 'success' | 'error';
 type EntryMode = 'manual' | 'auto';
 
-type FormNumbers = {
-    main: string[];
-    lucky: string;
+type TicketDraft = {
+    id: string;
+    numbers: number[];
+    luckyNumber: number | null;
 };
 
 function generateUniqueNumbers(): { numbers: number[]; lucky: number } {
@@ -33,6 +35,19 @@ function generateUniqueNumbers(): { numbers: number[]; lucky: number } {
     }
 
     return { numbers: main, lucky };
+}
+
+function createTicketDraft(): TicketDraft {
+    const randomId =
+        typeof globalThis.crypto !== 'undefined' && typeof globalThis.crypto.randomUUID === 'function'
+            ? globalThis.crypto.randomUUID()
+            : Math.random().toString(36).slice(2);
+
+    return {
+        id: randomId,
+        numbers: [],
+        luckyNumber: null,
+    };
 }
 
 function formatRoundPhase(phase: string | undefined): string {
@@ -62,26 +77,27 @@ export default function Home() {
         switchToExpectedNetwork,
         getTicketPrice,
         getActiveRound,
-        buyTicket,
+        buyTickets,
         getTicketData,
     } = useLottoContractContext();
 
     const [mode, setMode] = useState<EntryMode>('manual');
-    const [manualNumbers, setManualNumbers] = useState<FormNumbers>({
-        main: Array.from({ length: NUMBER_OF_PICKS }, () => ''),
-        lucky: '',
-    });
+    const [manualTickets, setManualTickets] = useState<TicketDraft[]>([createTicketDraft()]);
     const [autoNumbers, setAutoNumbers] = useState(() => generateUniqueNumbers());
     const [status, setStatus] = useState<SubmissionStatus>('idle');
     const [errorMessage, setErrorMessage] = useState<string | null>(null);
-    const [successTokenId, setSuccessTokenId] = useState<string | null>(null);
+    const [successTokenIds, setSuccessTokenIds] = useState<string[]>([]);
     const [transactionHash, setTransactionHash] = useState<string | null>(null);
     const [ticketPrice, setTicketPrice] = useState<string | null>(null);
     const [activeRoundId, setActiveRoundId] = useState<string | null>(null);
     const [activePhase, setActivePhase] = useState<string | undefined>(undefined);
-    const [latestTicket, setLatestTicket] = useState<TicketData | null>(null);
+    const [latestTickets, setLatestTickets] = useState<TicketData[]>([]);
 
     const lottoInterface = useMemo(() => new Interface(lottoAbi), []);
+    const numberOptions = useMemo(
+        () => Array.from({ length: MAX_NUMBER }, (_, index) => index + 1),
+        [],
+    );
 
     useEffect(() => {
         let isMounted = true;
@@ -118,24 +134,145 @@ export default function Home() {
         };
     }, [getActiveRound, getTicketPrice, isWrongNetwork]);
 
-    const handleManualNumberChange = (index: number, value: string) => {
-        const sanitized = value.replace(/[^0-9]/g, '');
-        setManualNumbers((previous) => {
-            const main = [...previous.main];
-            main[index] = sanitized;
-            return { ...previous, main };
-        });
-    };
-    const handleLuckyChange = (value: string) => {
-        const sanitized = value.replace(/[^0-9]/g, '');
-        setManualNumbers((previous) => ({ ...previous, lucky: sanitized }));
-    };
     const regenerateAutoNumbers = () => {
         setAutoNumbers(generateUniqueNumbers());
     };
 
-    const extractMintedTokenId = (receipt: Awaited<ReturnType<typeof buyTicket>>) => {
-        if (!receipt) return null;
+    const addManualTicket = () => {
+        setManualTickets((previous) => {
+            if (previous.length >= MAX_TICKETS_PER_PURCHASE) {
+                return previous;
+            }
+            return [...previous, createTicketDraft()];
+        });
+    };
+
+    const removeManualTicket = (index: number) => {
+        setManualTickets((previous) => {
+            if (previous.length <= 1) {
+                return [createTicketDraft()];
+            }
+            return previous.filter((_, idx) => idx !== index);
+        });
+    
+    const clearManualTicket = (index: number) => {
+        setManualTickets((previous) =>
+            previous.map((ticket, idx) =>
+                idx === index
+                    ?   {
+                            ...ticket,
+                            numbers: [],
+                            luckyNumber: null,
+                        }
+                    : ticket,
+            ),
+        );
+    };
+
+    const toggleMainNumber = (index: number, value: number) => {
+        setManualTickets((previous) =>
+            previous.map((ticket, idx) => {
+                if (idx !== index) {
+                    return ticket;
+                }
+
+                const numbersSet = new Set(ticket.numbers);
+                let luckyNumber = ticket.luckyNumber;
+
+                if (numbersSet.has(value)) {
+                    numbersSet.delete(value);
+                } else {
+                    if (numbersSet.size >= NUMBER_OF_PICKS) {
+                        return ticket;
+                    }
+                    numbersSet.add(value);
+                    if (luckyNumber === value) {
+                        luckyNumber = null;
+                    }
+                }
+
+                const updatedNumbers = Array.from(numbersSet).sort((a, b) => a - b);
+                return {
+                    ...ticket,
+                    numbers: updatedNumbers,
+                    luckyNumber,
+                };
+            }),
+        );
+    };
+
+    const toggleLuckyNumber = (index: number, value: number) => {
+        setManualTickets((previous) =>
+            previous.map((ticket, idx) => {
+                if (idx !== index) {
+                    return ticket;
+                }
+
+                const numbersSet = new Set(ticket.numbers);
+                let luckyNumber = ticket.luckyNumber;
+
+                if (luckyNumber === value) {
+                    luckyNumber = null;
+                } else {
+                    luckyNumber = value;
+                    if (numbersSet.has(value)) {
+                        numbersSet.delete(value);
+                    }
+                }
+
+                const updatedNumbers = Array.from(numbersSet).sort((a, b) => a - b);
+                return {
+                    ...ticket,
+                    numbers: updatedNumbers,
+                    luckyNumber,
+                };
+            }),
+        );
+    };
+
+    const validateManualTickets = (): { numbers: number[]; luckyNumber: number }[] | null => {
+        if (manualTickets.length === 0) {
+            setErrorMessage('Add at least one ticket.');
+            return null;
+        }
+
+        const sanitized: { numbers: number[]; luckyNumber: number }[] = [];
+
+        for (let i = 0; i < manualTickets.length; i += 1) {
+            const ticket = manualTickets[i];
+            if (ticket.numbers.length !== NUMBER_OF_PICKS) {
+                setErrorMessage(`Ticket ${i + 1} must include ${NUMBER_OF_PICKS} numbers.`);
+                return null;
+            }
+
+            const unique = new Set(ticket.numbers);
+            if (unique.size !== NUMBER_OF_PICKS) {
+                setErrorMessage(`Ticket ${i + 1} contains duplicate numbers.`);
+                return null;
+            }
+
+            if (ticket.luckyNumber === null) {
+                setErrorMessage(`Ticket ${i + 1} requires a lucky number.`);
+                return null;
+            }
+
+            if (unique.has(ticket.luckyNumber)) {
+                setErrorMessage(
+                    `Ticket ${i + 1} must use a lucky number different from the six main numbers.`,
+                );
+                return null;
+            }
+
+            sanitized.push({ numbers: [...ticket.numbers], luckyNumber: ticket.luckyNumber });
+        }
+
+        return sanitized;
+    };
+
+    const extractMintedTokenIds = (receipt: Awaited<ReturnType<typeof buyTickets>>): string[] => {
+        if (!receipt) return [];
+
+        const collected = new Set<string>();
 
         for (const log of receipt.logs ?? []) {
             try {
@@ -143,14 +280,14 @@ export default function Home() {
                 if (parsed?.name === 'TicketPurchased') {
                     const tokenId = parsed.args?.ticketId ?? parsed.args?.[1];
                     if (tokenId) {
-                        return tokenId.toString();
+                        collected.add(tokenId.toString());
                     }
                 }
                 if (parsed?.name === 'Transfer') {
                     const from = (parsed.args?.from ?? parsed.args?.[0]) as string | undefined;
                     const tokenId = parsed.args?.tokenId ?? parsed.args?.id ?? parsed.args?.value ?? parsed.args?.[2];
                     if (typeof from === 'string' && from.toLowerCase() === ZeroAddress.toLowerCase() && tokenId) {
-                        return tokenId.toString();
+                        collected.add(tokenId.toString());
                     }
                 }
             } catch {
@@ -158,45 +295,15 @@ export default function Home() {
             }
         }
 
-        return null;
-    };
-
-    const parseManualNumbers = (): { numbers: number[]; lucky: number } | null => {
-        const numeric = manualNumbers.main.map((value) => Number.parseInt(value, 10));
-        if (numeric.some((value) => Number.isNaN(value))) {
-            setErrorMessage('Please provide all six numbers.');
-            return null;
-        }
-        if (numeric.some((value) => value < MIN_NUMBER || value > MAX_NUMBER)) {
-            setErrorMessage(`Numbers must be between ${MIN_NUMBER} and ${MAX_NUMBER}.`);
-            return null;
-        }
-        const unique = new Set(numeric);
-        if (unique.size !== NUMBER_OF_PICKS) {
-            setErrorMessage('Numbers must be unique.');
-            return null;
-        }
-        const lucky = Number.parseInt(manualNumbers.lucky, 10);
-        if (Number.isNaN(lucky)) {
-            setErrorMessage('Please provide a lucky number.');
-            return null;
-        }
-        if (lucky < MIN_NUMBER || lucky > MAX_NUMBER) {
-            setErrorMessage(`Lucky number must be between ${MIN_NUMBER} and ${MAX_NUMBER}.`);
-            return null;
-        }
-        if (unique.has(lucky)) {
-            setErrorMessage('Lucky number must be different from the six main numbers.');
-            return null;
-        }
-        return { numbers: numeric, lucky };
+        return Array.from(collected);
     };
     const handleSubmit = async (event: FormEvent<HTMLFormElement>) => {
         event.preventDefault();
         setStatus('idle');
         setErrorMessage(null);
-        setSuccessTokenId(null);
+        setSuccessTokenIds([]);
         setTransactionHash(null);
+        setLatestTickets([]);
 
         if (!address) {
             setStatus('error');
@@ -214,22 +321,27 @@ export default function Home() {
             return;
         }
 
-        let selectedNumbers: number[];
-        let luckyNumber: number;
-        let isAutoPick = false;
+        let ticketDrafts: Array<{ numbers: number[]; luckyNumber: number; isAutoPick: boolean }> = [];
 
         if (mode === 'manual') {
-            const parsed = parseManualNumbers();
+            const parsed = validateManualTickets();
             if (!parsed) {
                 setStatus('error');
                 return;
             }
-            selectedNumbers = parsed.numbers;
-            luckyNumber = parsed.lucky;
+            ticketDrafts = parsed.map((ticket) => ({
+                numbers: ticket.numbers,
+                luckyNumber: ticket.luckyNumber,
+                isAutoPick: false,
+            }));
         } else {
-            selectedNumbers = autoNumbers.numbers;
-            luckyNumber = autoNumbers.lucky;
-            isAutoPick = true;
+            ticketDrafts = [
+                {
+                    numbers: autoNumbers.numbers,
+                    luckyNumber: autoNumbers.lucky,
+                    isAutoPick: true,
+                },
+            ];
         }
 
         try {
@@ -240,11 +352,13 @@ export default function Home() {
                     'Content-Type': 'application/json',
                 },
                 body: JSON.stringify({
-                    numbers: selectedNumbers,
-                    luckyNumber,
+                    tickets: ticketDrafts.map((ticket) => ({
+                        numbers: ticket.numbers,
+                        luckyNumber: ticket.luckyNumber,
+                        isAutoPick: ticket.isAutoPick,
+                    })),
                     drawId: activeRoundId,
-                    walletAddress: address,
-                    isAutoPick,
+                    walletAddress: address
                 }),
             });
 
@@ -253,22 +367,49 @@ export default function Home() {
                 throw new Error(body.error ?? 'Metadata upload failed.');
             }
 
-            const { ipfsUri } = (await metadataResponse.json()) as { ipfsUri: string };
+            const metadataPayload = (await metadataResponse.json()) as {
+                ipfsUri?: string;
+                ipfsUris?: string[];
+            };
+
+            const ipfsUris = Array.isArray(metadataPayload.ipfsUris)
+                ? metadataPayload.ipfsUris
+                : metadataPayload.ipfsUri
+                    ? [metadataPayload.ipfsUri]
+                    : [];
+
+            if (ipfsUris.length !== ticketDrafts.length) {
+                throw new Error('Metadata upload did not return the expected number of URIs.');
+            }
+
+            const ticketsWithMetadata = ticketDrafts.map((ticket, index) => ({
+                ...ticket,
+                tokenURI: ipfsUris[index],
+            }));
 
             setStatus('minting');
-            const receipt = await buyTicket(selectedNumbers, luckyNumber, isAutoPick, ipfsUri);
+            const receipt = await buyTickets(ticketsWithMetadata);
             if (!receipt) {
                 throw new Error('Transaction could not be confirmed.');
             }
 
-            const tokenId = extractMintedTokenId(receipt);
+            const tokenIds = extractMintedTokenIds(receipt);
             setTransactionHash(receipt.hash);
-            setSuccessTokenId(tokenId);
+            setSuccessTokenIds(tokenIds);
             setStatus('success');
 
-            if (tokenId) {
-                const ticket = await getTicketData(tokenId);
-                setLatestTicket(ticket);
+            if (tokenIds.length > 0) {
+                const fetched = await Promise.all(
+                    tokenIds.map(async (tokenId) => {
+                        try {
+                            return await getTicketData(BigInt(tokenId));
+                        } catch (error) {
+                            console.error('Failed to load minted ticket', error);
+                            return null;
+                        }
+                    }),
+                );
+                setLatestTickets(fetched.filter((ticket): ticket is TicketData => Boolean(ticket)));
             }
         } catch (error) {
             console.error('Ticket purchase failed', error);
@@ -276,18 +417,6 @@ export default function Home() {
             setErrorMessage(error instanceof Error ? error.message : 'Ticket purchase failed.');
         }
     };
-
-    const manualInputs = manualNumbers.main.map((value, index) => (
-        <input
-            key={index}
-            value={value}
-            onChange={(event) => handleManualNumberChange(index, event.target.value)}
-            inputMode="numeric"
-            pattern="[0-9]*"
-            placeholder={`#${index + 1}`}
-            className="w-full rounded-lg border border-slate-700 bg-slate-950 px-3 py-2 text-sm text-slate-100 focus:border-emerald-400 focus:outline-none"
-        />
-    ));
 
     return (
         <main className="min-h-screen bg-slate-950 text-slate-100">
@@ -375,23 +504,116 @@ export default function Home() {
                     </div>
 
                     {mode === 'manual' ? (
-                        <div className="mt-4 space-y-4">
-                            <div>
-                                <h3 className="text-sm font-semibold text-slate-300">Main numbers</h3>
-                                <div className="mt-2 grid grid-cols-2 gap-3 sm:grid-cols-3">
-                                    {manualInputs}
-                                </div>
-                            </div>
-                            <div>
-                                <h3 className="text-sm font-semibold text-slate-300">Lucky number</h3>
-                                <input
-                                    value={manualNumbers.lucky}
-                                    onChange={(event) => handleLuckyChange(event.target.value)}
-                                    inputMode="numeric"
-                                    pattern="[0-9]*"
-                                    placeholder="Lucky"
-                                    className="mt-2 w-full rounded-lg border border-slate-700 bg-slate-950 px-3 py-2 text-sm text-slate-100 focus:border-emerald-400 focus:outline-none sm:w-40"
-                                />
+                        <div className="mt-4 space-y-6">
+                            {manualTickets.map((ticket, index) => {
+                                const selectedCount = ticket.numbers.length;
+                                return (
+                                    <div
+                                        key={ticket.id}
+                                        className="rounded-lg border border-slate-800 bg-slate-950/60 p-4"
+                                    >
+                                        <div className="flex flex-wrap items-center justify-between gap-2">
+                                            <div>
+                                                <h3 className="text-sm font-semibold text-slate-200">
+                                                    Ticket {index + 1}
+                                                </h3>
+                                                <p className="text-xs text-slate-500">
+                                                    {selectedCount}/{NUMBER_OF_PICKS} main numbers selected
+                                                </p>
+                                            </div>
+                                            <div className="flex items-center gap-2 text-xs">
+                                                <button
+                                                    type="button"
+                                                    onClick={() => clearManualTicket(index)}
+                                                    className="rounded-md border border-slate-700 px-3 py-1 font-semibold text-slate-200 transition hover:border-emerald-400"
+                                                >
+                                                    Clear
+                                                </button>
+                                                <button
+                                                    type="button"
+                                                    onClick={() => removeManualTicket(index)}
+                                                    disabled={manualTickets.length <= 1}
+                                                    className="rounded-md border border-red-500/60 px-3 py-1 font-semibold text-red-200 transition hover:border-red-400 disabled:cursor-not-allowed disabled:opacity-40"
+                                                >
+                                                    Remove
+                                                </button>
+                                            </div>
+                                        </div>
+
+                                        <div className="mt-4 space-y-4">
+                                            <div>
+                                                <p className="text-xs uppercase tracking-wide text-slate-500">
+                                                    Main numbers
+                                                </p>
+                                                <div className="mt-2 grid grid-cols-9 gap-2 text-xs sm:grid-cols-9">
+                                                    {numberOptions.map((value) => {
+                                                        const isSelected = ticket.numbers.includes(value);
+                                                        const isLucky = ticket.luckyNumber === value;
+                                                        const isDisabled = !isSelected && selectedCount >= NUMBER_OF_PICKS;
+                                                        return (
+                                                            <button
+                                                                key={value}
+                                                                type="button"
+                                                                onClick={() => toggleMainNumber(index, value)}
+                                                                disabled={isDisabled}
+                                                                className={`rounded-md border px-2 py-1 font-semibold transition ${
+                                                                    isLucky
+                                                                        ? 'border-amber-400 bg-amber-500/20 text-amber-200'
+                                                                        : isSelected
+                                                                            ? 'border-emerald-400 bg-emerald-500/20 text-emerald-200'
+                                                                            : 'border-slate-700 text-slate-200 hover:border-emerald-400'
+                                                                } ${isDisabled ? 'cursor-not-allowed opacity-40' : ''}`}
+                                                            >
+                                                                {value}
+                                                            </button>
+                                                        );
+                                                    })}
+                                                </div>
+                                            </div>
+                                            <div>
+                                                <p className="text-xs uppercase tracking-wide text-slate-500">
+                                                    Lucky number
+                                                </p>
+                                                <div className="mt-2 grid grid-cols-9 gap-2 text-xs sm:grid-cols-9">
+                                                    {numberOptions.map((value) => {
+                                                        const isLucky = ticket.luckyNumber === value;
+                                                        const isMain = ticket.numbers.includes(value);
+                                                        return (
+                                                            <button
+                                                                key={value}
+                                                                type="button"
+                                                                onClick={() => toggleLuckyNumber(index, value)}
+                                                                className={`rounded-md border px-2 py-1 font-semibold transition ${
+                                                                    isLucky
+                                                                        ? 'border-amber-400 bg-amber-500/20 text-amber-200'
+                                                                        : isMain
+                                                                            ? 'border-emerald-400/60 text-emerald-200'
+                                                                            : 'border-slate-700 text-slate-200 hover:border-amber-400'
+                                                                }`}
+                                                            >
+                                                                {value}
+                                                            </button>
+                                                        );
+                                                    })}
+                                                </div>
+                                            </div>
+                                        </div>
+                                    </div>
+                                );
+                            })}
+
+                            <div className="flex flex-wrap items-center justify-between gap-3 text-xs text-slate-400">
+                                <p>
+                                    You can add up to {MAX_TICKETS_PER_PURCHASE} tickets per transaction.
+                                </p>
+                                <button
+                                    type="button"
+                                    onClick={addManualTicket}
+                                    disabled={manualTickets.length >= MAX_TICKETS_PER_PURCHASE}
+                                    className="rounded-md border border-emerald-400 px-3 py-1 font-semibold text-emerald-200 transition hover:bg-emerald-500/10 disabled:cursor-not-allowed disabled:opacity-40"
+                                >
+                                    Add ticket
+                                </button>
                             </div>
                         </div>
                     ) : (
@@ -426,15 +648,21 @@ export default function Home() {
                                 ? 'Uploading metadata…'
                                 : status === 'minting'
                                     ? 'Awaiting transaction…'
-                                    : 'Buy ticket'}
+                                    : 'Buy tickets'}
                         </button>
                         {errorMessage && (
                             <p className="text-sm text-red-400">{errorMessage}</p>
                         )}
                         {status === 'success' && (
                             <div className="rounded-lg border border-emerald-600 bg-emerald-500/10 p-4 text-sm text-emerald-200">
-                                <p>Ticket purchased successfully.</p>
-                                {successTokenId && <p>Token ID: {successTokenId}</p>}
+                                <p>
+                                    {successTokenIds.length > 1
+                                        ? 'Tickets purchased successfully.'
+                                        : 'Ticket purchased successfully.'}
+                                </p>
+                                {successTokenIds.length > 0 && (
+                                    <p>Token IDs: {successTokenIds.join(', ')}</p>
+                                )}
                                 {transactionHash && (
                                     <p>
                                         Transaction:{' '}
@@ -453,35 +681,44 @@ export default function Home() {
                     </form>
                 </section>
 
-                {latestTicket && (
+                {latestTickets.length > 0 && (
                     <section className="rounded-xl border border-slate-800 bg-slate-900/60 p-6">
-                        <h2 className="text-lg font-semibold">Latest ticket</h2>
-                        <dl className="mt-3 grid gap-2 text-sm text-slate-300 sm:grid-cols-2">
-                            <div>
-                                <dt className="text-slate-500">Token ID</dt>
-                                <dd className="font-medium text-slate-100">{latestTicket.id}</dd>
-                            </div>
-                            <div>
-                                <dt className="text-slate-500">Round</dt>
-                                <dd className="font-medium text-slate-100">{latestTicket.roundId}</dd>
-                            </div>
-                            <div>
-                                <dt className="text-slate-500">Numbers</dt>
-                                <dd className="font-medium text-slate-100">{latestTicket.numbers.join(', ')}</dd>
-                            </div>
-                            <div>
-                                <dt className="text-slate-500">Lucky number</dt>
-                                <dd className="font-medium text-slate-100">{latestTicket.luckyNumber}</dd>
-                            </div>
-                            <div>
-                                <dt className="text-slate-500">Mode</dt>
-                                <dd className="font-medium text-slate-100">{latestTicket.isAutoPick ? 'Auto' : 'Manual'}</dd>
-                            </div>
-                            <div>
-                                <dt className="text-slate-500">Claimed</dt>
-                                <dd className="font-medium text-slate-100">{latestTicket.claimed ? 'Yes' : 'No'}</dd>
-                            </div>
-                        </dl>
+                        <h2 className="text-lg font-semibold">Latest tickets</h2>
+                        <div className="mt-3 grid gap-4">
+                            {latestTickets.map((ticket) => (
+                                <div
+                                    key={ticket.id}
+                                    className="rounded-lg border border-slate-800 bg-slate-950/60 p-4"
+                                >
+                                    <dl className="grid gap-2 text-sm text-slate-300 sm:grid-cols-2">
+                                        <div>
+                                            <dt className="text-slate-500">Token ID</dt>
+                                            <dd className="font-medium text-slate-100">{ticket.id}</dd>
+                                        </div>
+                                        <div>
+                                            <dt className="text-slate-500">Round</dt>
+                                            <dd className="font-medium text-slate-100">{ticket.roundId}</dd>
+                                        </div>
+                                        <div>
+                                            <dt className="text-slate-500">Numbers</dt>
+                                            <dd className="font-medium text-slate-100">{ticket.numbers.join(', ')}</dd>
+                                        </div>
+                                        <div>
+                                            <dt className="text-slate-500">Lucky number</dt>
+                                            <dd className="font-medium text-slate-100">{ticket.luckyNumber}</dd>
+                                        </div>
+                                        <div>
+                                            <dt className="text-slate-500">Mode</dt>
+                                            <dd className="font-medium text-slate-100">{ticket.isAutoPick ? 'Auto' : 'Manual'}</dd>
+                                        </div>
+                                        <div>
+                                            <dt className="text-slate-500">Claimed</dt>
+                                            <dd className="font-medium text-slate-100">{ticket.claimed ? 'Yes' : 'No'}</dd>
+                                        </div>
+                                    </dl>
+                                </div>
+                            ))}
+                        </div>
                     </section>
                 )}
             </div>

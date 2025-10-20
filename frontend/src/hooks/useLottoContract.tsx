@@ -44,6 +44,13 @@ export type TicketData = {
     claimed: boolean;
 };
 
+export type TicketPurchasePayload = {
+    numbers: number[];
+    luckyNumber: number;
+    isAutoPick: boolean;
+    tokenURI: string;
+};
+
 export type RoundInfo = {
     id: bigint;
     startTime: number;
@@ -85,6 +92,7 @@ export type LottoContractContextValue = {
     getActiveRound: () => Promise<RoundInfo | null>;
     getRoundInfo: (roundId: number | bigint) => Promise<RoundInfo | null>;
     getTicketData: (ticketId: number | bigint) => Promise<TicketData | null>;
+    buyTickets: (tickets: TicketPurchasePayload[]) => Promise<TransactionReceipt | null>;
     buyTicket: (
         numbers: Array<number>,
         luckyNumber: number,
@@ -122,6 +130,9 @@ const CONFIGURED_RPC_URL = contractConfig.rpcUrl;
 
 const normalizeAddress = (value: string | null | undefined) =>
     (value ? value.toLowerCase() : null);
+const REQUIRED_NUMBERS = 6;
+const MIN_NUMBER = 1;
+const MAX_NUMBER = 45;
 
 const mapPhase = (value: bigint | number): RoundPhase => {
     const numeric = typeof value === 'bigint' ? Number(value) : value;
@@ -330,7 +341,7 @@ export function useLottoContract(): LottoContractContextValue {
     }, [signer]);
 
     const readContract = useMemo(() => {
-        const readProvider = signer?.provider ?? provider ?? staticProvider;
+        const readProvider = staticProvider ?? signer?.provider ?? provider;
 
         if (!readProvider || !CONTRACT_ADDRESS) {
             return null;
@@ -371,7 +382,7 @@ export function useLottoContract(): LottoContractContextValue {
     }, [readContract]);
 
     const getTicketPrice = useCallback(async () => {
-        const contractInstance = contractWithSigner ?? readContract;
+        const contractInstance = readContract ?? contractWithSigner;
         if (!contractInstance) {
             return null;
         }
@@ -407,30 +418,85 @@ export function useLottoContract(): LottoContractContextValue {
         throw new Error('You are not authorized to perform this action.');
     }, [address, contractWithSigner, ownerAddress]);
 
-    const buyTicket = useCallback(
-        async (
-            numbers: Array<number>,
-            luckyNumber: number,
-            isAutoPick: boolean,
-            tokenURI: string,
-        ): Promise<TransactionReceipt | null> => {
+    const buyTickets = useCallback(
+        async (tickets: TicketPurchasePayload[]): Promise<TransactionReceipt | null> => {
             if (!contractWithSigner) {
                 throw new Error('Connect your wallet before buying tickets.');
             }
 
-            if (numbers.length !== 6) {
-                throw new Error('Exactly 6 numbers are required to buy a ticket.');
+            if (!Array.isArray(tickets) || tickets.length === 0) {
+                throw new Error('Provide at least one ticket to purchase.');
             }
+
+            if (tickets.length > 50) {
+                throw new Error('You can purchase up to 50 tickets per transaction.');
+            }
+
+            const normalizedTickets = tickets.map((ticket, index) => {
+                const position = index + 1;
+
+                if (!Array.isArray(ticket.numbers) || ticket.numbers.length !== REQUIRED_NUMBERS) {
+                    throw new Error(`Ticket ${position}: exactly ${REQUIRED_NUMBERS} numbers are required.`);
+                }
+
+                const numericNumbers = ticket.numbers.map((value) => {
+                    if (typeof value !== 'number' || Number.isNaN(value)) {
+                        throw new Error(`Ticket ${position}: numbers must be numeric.`);
+                    }
+                    const intValue = Math.trunc(value);
+                    if (intValue < MIN_NUMBER || intValue > MAX_NUMBER) {
+                        throw new Error(`Ticket ${position}: numbers must be between ${MIN_NUMBER} and ${MAX_NUMBER}.`);
+                    }
+                    return intValue;
+                });
+
+                const unique = new Set(numericNumbers);
+                if (unique.size !== REQUIRED_NUMBERS) {
+                    throw new Error(`Ticket ${position}: numbers must be unique.`);
+                }
+
+                const luckyInt = Math.trunc(ticket.luckyNumber);
+                if (Number.isNaN(luckyInt)) {
+                    throw new Error(`Ticket ${position}: lucky number is required.`);
+                }
+                if (luckyInt < MIN_NUMBER || luckyInt > MAX_NUMBER) {
+                    throw new Error(`Ticket ${position}: lucky number must be between ${MIN_NUMBER} and ${MAX_NUMBER}.`);
+                }
+                if (unique.has(luckyInt)) {
+                    throw new Error(`Ticket ${position}: lucky number must be different from the six main numbers.`);
+                }
+
+                if (!ticket.tokenURI || typeof ticket.tokenURI !== 'string') {
+                    throw new Error(`Ticket ${position}: tokenURI is required.`);
+                }
+
+                numericNumbers.sort((a, b) => a - b);
+
+                return {
+                    numbers: numericNumbers,
+                    luckyNumber: luckyInt,
+                    isAutoPick: Boolean(ticket.isAutoPick),
+                    tokenURI: ticket.tokenURI,
+                };
+            });
 
             try {
                 const ticketPrice = await contractWithSigner.ticketPrice();
-                const tx: TransactionResponse = await contractWithSigner.buyTicket(
-                    numbers,
-                    luckyNumber,
-                    isAutoPick,
-                    tokenURI,
+                const count = BigInt(normalizedTickets.length);
+                const totalCost = ticketPrice * count;
+
+                const numbersPayload = normalizedTickets.map((ticket) => ticket.numbers);
+                const luckyNumbersPayload = normalizedTickets.map((ticket) => ticket.luckyNumber);
+                const autoPicksPayload = normalizedTickets.map((ticket) => ticket.isAutoPick);
+                const tokenUrisPayload = normalizedTickets.map((ticket) => ticket.tokenURI);
+
+                const tx: TransactionResponse = await contractWithSigner.buyTickets(
+                    numbersPayload,
+                    luckyNumbersPayload,
+                    autoPicksPayload,
+                    tokenUrisPayload,
                     {
-                        value: ticketPrice,
+                        value: totalCost,
                     },
                 );
                 updatePending(tx.hash);
@@ -443,6 +509,24 @@ export function useLottoContract(): LottoContractContextValue {
             }
         },
         [contractWithSigner, updatePending],
+    );
+
+    const buyTicket = useCallback(
+        async (
+            numbers: Array<number>,
+            luckyNumber: number,
+            isAutoPick: boolean,
+            tokenURI: string,
+        ): Promise<TransactionReceipt | null> =>
+            buyTickets([
+                {
+                    numbers,
+                    luckyNumber,
+                    isAutoPick,
+                    tokenURI,
+                },
+            ]),
+        [buyTickets],
     );
 
     const getTicketData = useCallback(
@@ -625,6 +709,7 @@ export function useLottoContract(): LottoContractContextValue {
         getActiveRound,
         getRoundInfo,
         getTicketData,
+        buyTickets,
         buyTicket,
         claimPrize,
         closeCurrentRound,

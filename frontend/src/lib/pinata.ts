@@ -83,3 +83,12 @@ export async function uploadTicketMetadata(ticket: TicketPayload): Promise<strin
 
     return payload.IpfsHash;
 }
+
+export async function uploadTicketsMetadata(tickets: TicketPayload[]): Promise<string[]> {
+    if (tickets.length === 0) {
+        return [];
+    }
+
+    const uploads = tickets.map((ticket) => uploadTicketMetadata(ticket));
+    return Promise.all(uploads);
+}

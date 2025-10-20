@@ -1,14 +1,22 @@
 import { NextRequest, NextResponse } from 'next/server';
 
-import { uploadTicketMetadata } from '@/lib/pinata';
+import { uploadTicketMetadata, uploadTicketsMetadata } from '@/lib/pinata';
 
 type UploadRequestBody = {
+    tickets?: TicketRequestBody[];
     numbers?: number[];
     luckyNumber?: number;
     drawId?: string | number;
     drawNumber?: string | number;
     walletAddress?: string;
     address?: string;
+    isAutoPick?: boolean;
+    timestamp?: string;
+};
+
+type TicketRequestBody = {
+    numbers?: number[];
+    luckyNumber?: number;
     isAutoPick?: boolean;
     timestamp?: string;
 };
@@ -81,15 +89,57 @@ export async function POST(request: NextRequest) {
     try {
         const body = (await request.json()) as UploadRequestBody;
 
+        const drawId = normalizeDrawId(body.drawId ?? body.drawNumber);
+        const owner = normalizeWallet(body.walletAddress ?? body.address);
+        const baseTimestamp = body.timestamp ?? new Date().toISOString();
+
+        const ticketArray = Array.isArray(body.tickets) ? body.tickets : null;
+        if (ticketArray && ticketArray.length > 0) {
+            const payloads = ticketArray.map((ticket, index) => {
+                let numbers: number[];
+                try {
+                    numbers = parseNumbers(ticket.numbers);
+                } catch (error) {
+                    const message = error instanceof Error ? error.message : 'Invalid numbers.';
+                    throw new Error(`Ticket ${index + 1}: ${message}`);
+                }
+
+                let luckyNumber: number;
+                try {
+                    luckyNumber = parseLuckyNumber(ticket.luckyNumber);
+                } catch (error) {
+                    const message = error instanceof Error ? error.message : 'Invalid lucky number.';
+                    throw new Error(`Ticket ${index + 1}: ${message}`);
+                }
+
+                if (numbers.includes(luckyNumber)) {
+                    throw new Error(`Ticket ${index + 1}: luckyNumber must be different from the six main numbers.`);
+                }
+
+                const sanitizedTimestamp = ticket.timestamp ?? baseTimestamp;
+
+                return {
+                    drawId,
+                    numbers,
+                    luckyNumber,
+                    isAutoPick: Boolean(ticket.isAutoPick),
+                    owner,
+                    timestamp: sanitizedTimestamp,
+                };
+            });
+
+            const cids = await uploadTicketsMetadata(payloads);
+            const ipfsUris = cids.map((cid) => `ipfs://${cid}`);
+            return NextResponse.json({ ipfsUris });
+        }
+
         const numbers = parseNumbers(body.numbers);
         const luckyNumber = parseLuckyNumber(body.luckyNumber);
         if (numbers.includes(luckyNumber)) {
             throw new Error('luckyNumber must be different from the six main numbers.');
         }
-        const drawId = normalizeDrawId(body.drawId ?? body.drawNumber);
-        const owner = normalizeWallet(body.walletAddress ?? body.address);
         const isAutoPick = Boolean(body.isAutoPick);
-        const timestamp = body.timestamp ?? new Date().toISOString();
+        const timestamp = baseTimestamp;
 
         const cid = await uploadTicketMetadata({
             drawId,
@@ -100,7 +150,8 @@ export async function POST(request: NextRequest) {
             timestamp,
         });
 
-        return NextResponse.json({ ipfsUri: `ipfs://${cid}` });
+        const ipfsUri = `ipfs://${cid}`;
+        return NextResponse.json({ ipfsUri, ipfsUris: [ipfsUri] });
     } catch (error) {
         console.error('Metadata upload failed', error);
         const message = error instanceof Error ? error.message : 'Unknown error';

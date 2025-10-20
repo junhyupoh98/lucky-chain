@@ -104,4 +104,61 @@ contract LottoVRFTest is Test {
         assertEq(user.balance, userBalanceBefore + info.pFirst);
         assertTrue(lotto.ticketClaimed(0));
     }
+
+    function testBuyTicketsBatchMintsAll() public {
+        vm.deal(user, 5 ether);
+
+        uint8[6][] memory batchNumbers = new uint8[6][](2);
+        batchNumbers[0] = [uint8(1), 2, 3, 4, 5, 6];
+        batchNumbers[1] = [uint8(7), 8, 9, 10, 11, 12];
+
+        uint8[] memory luckyNumbers = new uint8[](2);
+        luckyNumbers[0] = 13;
+        luckyNumbers[1] = 14;
+
+        bool[] memory autoPicks = new bool[](2);
+        autoPicks[1] = true;
+
+        string[] memory uris = new string[](2);
+        uris[0] = "ipfs://ticket-1";
+        uris[1] = "ipfs://ticket-2";
+
+        vm.prank(user);
+        lotto.buyTickets{value: TICKET_PRICE * 2}(batchNumbers, luckyNumbers, autoPicks, uris);
+
+        assertEq(lotto.nextTicketId(), 2);
+        assertEq(lotto.ticketLuckyNumber(0), 13);
+        assertEq(lotto.ticketLuckyNumber(1), 14);
+        assertFalse(lotto.ticketAutoPick(0));
+        assertTrue(lotto.ticketAutoPick(1));
+        assertEq(lotto.ticketToRound(0), 1);
+        assertEq(lotto.ticketToRound(1), 1);
+
+        Lotto.RoundView memory info = lotto.getRoundInfo(1);
+        assertEq(info.ticketCount, 2);
+        assertEq(info.gross, TICKET_PRICE * 2);
+    }
+
+    function testBuyTicketsRevertsWhenOverLimit() public {
+        uint256 limit = lotto.MAX_TICKETS_PER_PURCHASE();
+        uint256 count = limit + 1;
+
+        uint8[6][] memory batchNumbers = new uint8[6][](count);
+        uint8[] memory luckyNumbers = new uint8[](count);
+        bool[] memory autoPicks = new bool[](count);
+        string[] memory uris = new string[](count);
+
+        for (uint256 i = 0; i < count; i++) {
+            batchNumbers[i] = [uint8(1), 2, 3, 4, 5, 6];
+            luckyNumbers[i] = 7;
+            uris[i] = "ipfs://ticket";
+            autoPicks[i] = false;
+        }
+
+        vm.deal(user, TICKET_PRICE * count);
+
+        vm.expectRevert(Lotto.TooManyTickets.selector);
+        vm.prank(user);
+        lotto.buyTickets{value: TICKET_PRICE * count}(batchNumbers, luckyNumbers, autoPicks, uris);
+    }
 }
