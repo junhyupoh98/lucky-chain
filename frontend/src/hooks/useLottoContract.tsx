@@ -144,7 +144,6 @@ const getExpectedChainId = () => {
 const getExpectedRpcUrl = () => contractConfig.rpcUrl ?? DEFAULT_RPC_URL;
 const CONTRACT_ADDRESS = contractConfig.address;
 const allowedAdminAddresses = staticAllowedAdmins ?? [];
-const CONFIGURED_RPC_URL = contractConfig.rpcUrl;
 
 const normalizeAddress = (value: string | null | undefined) =>
     (value ? value.toLowerCase() : null);
@@ -326,18 +325,17 @@ export function useLottoContract(): LottoContractContextValue {
         [expectedChainId],
     );
 
+    const resolvedRpcUrl = useMemo(() => getExpectedRpcUrl(), [contractConfig.rpcUrl]);
+
     const staticProvider = useMemo<JsonRpcProvider | null>(() => {
-        if (!CONFIGURED_RPC_URL) {
-            return null;
-        }
 
         try {
-            return new JsonRpcProvider(CONFIGURED_RPC_URL);
+            return new JsonRpcProvider(resolvedRpcUrl);
         } catch (error) {
             console.error('Failed to initialize RPC provider', error);
             return null;
         }
-    }, [CONFIGURED_RPC_URL]);
+    }, [resolvedRpcUrl]);
 
     useEffect(() => {
         if (typeof window === 'undefined') {
