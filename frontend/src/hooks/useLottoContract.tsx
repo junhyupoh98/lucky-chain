@@ -43,6 +43,7 @@ export type TicketData = {
     isAutoPick: boolean;
     tier: number;
     claimed: boolean;
+    tokenURI: string | null;
 };
 
 export type TicketPurchasePayload = {
@@ -151,6 +152,112 @@ const REQUIRED_NUMBERS = 6;
 const MIN_NUMBER = 1;
 const MAX_NUMBER = 45;
 
+const FRIENDLY_ERROR_MESSAGES: Record<string, string> = {
+    AlreadyClaimed: 'This ticket has already been claimed.',
+    AlreadyFinalized: 'Payouts for this round are already finalized.',
+    InvalidBatchLength: 'Ticket submission was malformed. Please try again.',
+    InvalidNumbers: 'One or more ticket numbers are invalid. Please double-check your picks.',
+    NoPrize: 'This ticket is not eligible for a prize.',
+    NotTicketOwner: 'You must own the ticket to perform this action.',
+    PayoutsNotReady: 'Payouts are not ready yet. Please wait for the draw to finish.',
+    TicketNotFound: 'The requested ticket could not be found.',
+    TooManyTickets: 'You can purchase up to 50 tickets per transaction.',
+    WrongPhase: 'Ticket sales are currently closed.',
+};
+
+const cleanRevertReason = (value: string): string =>
+    value.replace(/^execution reverted:?\s*/i, '').trim();
+
+const isMissingRevertDataMessage = (value: string | null | undefined): boolean =>
+    typeof value === 'string' && value.toLowerCase().includes('missing revert data');
+
+const getRevertData = (error: any): string | null => {
+    if (!error || typeof error !== 'object') {
+        return null;
+    }
+
+    const candidates = [
+        error.data,
+        error.error?.data,
+        error.error?.error?.data,
+        error.info?.error?.data,
+        error.info?.error?.error?.data,
+    ];
+
+    for (const value of candidates) {
+        if (typeof value === 'string' && value) {
+            return value;
+        }
+    }
+
+    return null;
+};
+
+const extractReasonMessage = (error: any): string | null => {
+    if (!error || typeof error !== 'object') {
+        return null;
+    }
+
+    const candidates = [
+        error.shortMessage,
+        error.reason,
+        error.error?.message,
+        error.info?.error?.message,
+        error.message,
+    ];
+
+    for (const value of candidates) {
+        if (typeof value === 'string' && value.trim()) {
+            return value;
+        }
+    }
+
+    return null;
+};
+
+const normalizeContractError = (
+    contractInstance: Contract | null,
+    error: unknown,
+    fallbackMessage: string,
+): Error => {
+    if (contractInstance) {
+        const revertData = getRevertData(error);
+        if (revertData) {
+            try {
+                const decoded = contractInstance.interface.parseError(revertData);
+                if (decoded?.name) {
+                    const friendly = FRIENDLY_ERROR_MESSAGES[decoded.name];
+                    if (friendly) {
+                        const wrapped = new Error(friendly);
+                        (wrapped as any).cause = error;
+                        return wrapped;
+                    }
+                    const wrapped = new Error(decoded.name);
+                    (wrapped as any).cause = error;
+                    return wrapped;
+                }
+            } catch (decodeError) {
+                console.error('Failed to decode contract error', decodeError);
+            }
+        }
+    }
+
+    if (error instanceof Error) {
+        const reason = extractReasonMessage(error);
+        if (reason && !isMissingRevertDataMessage(reason)) {
+            const wrapped = new Error(cleanRevertReason(reason));
+            (wrapped as any).cause = error;
+            return wrapped;
+        }
+
+        if (!isMissingRevertDataMessage(error.message)) {
+            return error;
+        }
+    }
+
+    return new Error(fallbackMessage);
+};
+
 const mapPhase = (value: bigint | number): RoundPhase => {
     const numeric = typeof value === 'bigint' ? Number(value) : value;
     return PHASE_MAP[numeric] ?? 'sales';
@@ -197,6 +304,7 @@ const ticketInfoFromContract = (payload: any): TicketData => {
         isAutoPick: Boolean(payload.isAutoPick ?? false),
         tier: Number(payload.tier ?? 0),
         claimed: Boolean(payload.claimed ?? false),
+        tokenURI: typeof payload?.tokenURI === 'string' ? payload.tokenURI : null,
     };
 };
 
@@ -563,7 +671,22 @@ export function useLottoContract(): LottoContractContextValue {
             });
 
             try {
-                const ticketPrice = await contractWithSigner.ticketPrice();
+                const rawPrice = await contractWithSigner.ticketPrice();
+                let ticketPrice: bigint;
+
+                if (typeof rawPrice === 'bigint') {
+                    ticketPrice = rawPrice;
+                } else if (rawPrice && typeof rawPrice === 'object' && 'toString' in rawPrice) {
+                    const parsed = BigInt(rawPrice.toString());
+                    ticketPrice = parsed;
+                } else {
+                    throw new Error('Failed to determine the ticket price.');
+                }
+
+                if (ticketPrice <= BigInt(0)) {
+                    throw new Error('Ticket price is not configured. Please try again later.');
+                }
+
                 const count = BigInt(normalizedTickets.length);
                 const totalCost = ticketPrice * count;
 
@@ -620,7 +743,18 @@ export function useLottoContract(): LottoContractContextValue {
             try {
                 const id = typeof ticketId === 'bigint' ? ticketId : BigInt(ticketId);
                 const response = await readContract.getTicketInfo(id);
-                return ticketInfoFromContract(response);
+                const baseTicket = ticketInfoFromContract(response);
+
+                try {
+                    const uri = await readContract.tokenURI(id);
+                    if (typeof uri === 'string') {
+                        return { ...baseTicket, tokenURI: uri };
+                    }
+                } catch (error) {
+                    console.warn('Failed to fetch token URI', error);
+                }
+
+                return baseTicket;
             } catch (error) {
                 console.error('Failed to fetch ticket data', error);
                 return null;

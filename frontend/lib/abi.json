@@ -51,6 +51,56 @@
         "stateMutability": "nonpayable"
     },
     {
+        "type": "error",
+        "name": "AlreadyClaimed",
+        "inputs": []
+    },
+    {
+        "type": "error",
+        "name": "AlreadyFinalized",
+        "inputs": []
+    },
+    {
+        "type": "error",
+        "name": "InvalidBatchLength",
+        "inputs": []
+    },
+    {
+        "type": "error",
+        "name": "InvalidNumbers",
+        "inputs": []
+    },
+    {
+        "type": "error",
+        "name": "NoPrize",
+        "inputs": []
+    },
+    {
+        "type": "error",
+        "name": "NotTicketOwner",
+        "inputs": []
+    },
+    {
+        "type": "error",
+        "name": "PayoutsNotReady",
+        "inputs": []
+    },
+    {
+        "type": "error",
+        "name": "TicketNotFound",
+        "inputs": []
+    },
+    {
+        "type": "error",
+        "name": "TooManyTickets",
+        "inputs": []
+    },
+    {
+        "type": "error",
+        "name": "WrongPhase",
+        "inputs": []
+    },
+    {
         "type": "event",
         "name": "TicketPurchased",
         "inputs": [

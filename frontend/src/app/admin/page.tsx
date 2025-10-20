@@ -4,6 +4,7 @@ import { useCallback, useEffect, useMemo, useState } from 'react';
 import type { FormEvent } from 'react';
 import { formatEther } from 'ethers';
 
+import RoundStatsGrid from '@/components/RoundStatsGrid';
 import { useLottoContractContext, type RoundInfo } from '@/hooks/useLottoContract';
 
 type OperationLog = {
@@ -342,6 +343,7 @@ export default function AdminPage() {
                             Refresh
                         </button>
                     </div>
+                    <RoundStatsGrid round={roundInfo} className="mt-4" />
                     <div className="mt-3 text-sm text-slate-300">
                         {isLoadingRound && <p>Loading round information…</p>}
                         {!isLoadingRound && roundInfo && (
