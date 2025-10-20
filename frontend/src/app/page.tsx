@@ -1,13 +1,13 @@
 "use client";
 
 import { FormEvent, useCallback, useEffect, useMemo, useState } from "react";
-import { Interface, formatEther } from "ethers";
+import { Interface, JsonRpcProvider, formatEther } from "ethers";
 
 import lottoAbi from "../../lib/abi.json";
 import RoundStatsGrid from "@/components/RoundStatsGrid";
 import { useLottoContractContext } from "@/hooks/useLottoContract";
 import type { RoundInfo, TicketData } from "@/hooks/useLottoContract";
-import { address as contractAddress } from "../../lib/contractConfig";
+import { address as contractAddress, rpcUrl as contractRpcUrl } from "../../lib/contractConfig";
 
 const NUMBER_OF_PICKS = 6;
 const MIN_NUMBER = 1;
@@ -344,6 +344,17 @@ export default function Home() {
         }
     }, [ticketPrice, currentTicketCount]);
 
+    const fallbackProvider = useMemo(() => {
+        const url = contractRpcUrl?.trim() || "https://public-en-kairos.node.kaia.io";
+
+        try {
+            return new JsonRpcProvider(url);
+        } catch (error) {
+            console.warn("Failed to create fallback provider", error);
+            return null;
+        }
+    }, [contractRpcUrl]);
+
     useEffect(() => {
         const loadRoundInfo = async () => {
             try {
@@ -365,7 +376,7 @@ export default function Home() {
     }, [getActiveRound]);
 
     useEffect(() => {
-        if (!provider || !address) {
+        if ((!provider && !fallbackProvider) || !address) {
             setResolvedName(null);
             setWalletBalance(null);
             return;
@@ -373,22 +384,39 @@ export default function Home() {
 
         let cancelled = false;
 
-        const loadWalletInfo = async () => {
-            try {
-                const [nameResult, balanceResult] = await Promise.all([
-                    provider.lookupAddress(address).catch(() => null),
-                    provider.getBalance(address),
-                ]);
+        const providersToTry = [fallbackProvider, provider].filter(
+            (candidate): candidate is NonNullable<typeof provider> | JsonRpcProvider => candidate != null,
+        );
 
-                if (!cancelled) {
-                    setResolvedName(typeof nameResult === "string" ? nameResult : null);
-                    setWalletBalance(formatEther(balanceResult));
+        const loadWalletInfo = async () => {
+            let lastError: unknown = null;
+
+            for (const currentProvider of providersToTry) {
+                try {
+                    const [nameResult, balanceResult] = await Promise.all([
+                        currentProvider.lookupAddress(address).catch(() => null),
+                        currentProvider.getBalance(address),
+                    ]);
+
+                    if (!cancelled) {
+                        setResolvedName(typeof nameResult === "string" ? nameResult : null);
+                        setWalletBalance(formatEther(balanceResult));
+                    }
+                    return;
+                } catch (error) {
+                    lastError = error;
                 }
-            } catch (error) {
-                console.error("Failed to load wallet info", error);
-                if (!cancelled) {
-                    setWalletBalance(null);
-                }
+            }
+
+            if (!cancelled) {
+                setResolvedName(null);
+                setWalletBalance(null);
+            }
+
+            if (!cancelled && lastError) {
+                const message = extractErrorMessage(lastError);
+                const detail = message ? `: ${message}` : "";
+                console.warn(`Failed to load wallet info via available providers${detail}`, lastError);
             }
         };
 
@@ -397,7 +425,7 @@ export default function Home() {
         return () => {
             cancelled = true;
         };
-    }, [provider, address]);
+    }, [provider, address, fallbackProvider]);
 
     useEffect(() => {
         if (!provider) {
