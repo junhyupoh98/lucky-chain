@@ -1,3 +1,6 @@
+import React from 'react';
+import MobileHeader from './components/MobileHeader';
+
 function Userp({ onNavigate }) {
   return (
     <div style={{
@@ -7,25 +10,10 @@ function Userp({ onNavigate }) {
       background: '#380D44',
       overflow: 'hidden'
     }}>
-           <div style={{
-          width: 160,
-          height: 33,
-          left: 10,
-          top: 7,
-          position: 'absolute',
-          color: '#fff',
-          fontSize: 11,
-          fontFamily: 'SF Pro',
-          fontWeight: '800',
-          lineHeight: '22px',
-          overflowWrap: 'break-word',
-          zIndex: 2147483647,
-          opacity: 1,
-          padding: '4px 8px',
-          boxShadow: '0 6px 18px rgba(0,0,0,0.35)'
-        }}>9:41
-    </div>
-  <div
+      {/* 헤더 컴포넌트 사용 */}
+      <MobileHeader />
+      
+      <div
             data-svg-wrapper
             style={{
               position: 'absolute',

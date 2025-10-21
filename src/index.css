@@ -120,20 +120,84 @@ position: relative;
   -webkit-overflow-scrolling: touch;
   position: relative;   /* 절대 배치 요소가 내부 기준으로 위치하려면 필요 */
   box-sizing: border-box;
-  padding: 12px;        /* 필요하면 패딩 */
+  display: flex;
+  justify-content: center;  /* 수평 중앙 정렬 */
+  align-items: flex-start;  /* 상단 정렬 */
+  padding: 0;               /* 패딩 제거 */
 }
 
-:root { --topbar-height: 56px; }
 
-.topbar { height: var(--topbar-height); }
+.selected-numbers {
+  padding: 20px;
+  text-align: center;
+  color: #fff;
+}
 
-/* main이 뷰포트에서 topbar 높이를 뺀 높이를 가짐 */
-.scroll-area { height: calc(100vh - var(--topbar-height)); }
+.number-circle {
+  width: 40px;
+  height: 40px;
+  border-radius: 50%;
+  background-color: #6E0058;
+  color: white;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-weight: bold;
+}
 
-/* 실제 스크롤이 일어나는 곳 */
-.page-container {
-  height: 100%;
-  overflow-y: auto;           /* 내부에서만 스크롤 */
-  -webkit-overflow-scrolling: touch;
-  position: relative;         /* 내부 절대 배치 요소 기준 */
+/* Mobile Header Styles */
+.mobile-header {
+  transform: translate(20px, 0.1px);
+  position: absolute;
+  top: 0;
+  left: 0;
+  width: 100%;
+  z-index: 1000;
+}
+
+.mobile-time {
+  left: 0.8px;
+  top: 4px;
+  position: absolute;
+  color: white;
+  font-size: 12px;
+  font-family: 'SF Pro Text', Arial, sans-serif;
+  font-weight: 600;
+  line-height: 3.1;
+  word-wrap: break-word;
+}
+
+.mobile-status-bar {
+  transform: translate(23px, 10px);
+  position: relative;
+}
+
+.battery-container {
+  left: 319.33px;
+  top: 4px;
+  position: absolute;
+}
+
+.battery-terminal {
+  left: 342.33px;
+  top: 7.67px;
+  position: absolute;
+}
+
+.battery-fill {
+  left: 321.33px;
+  top: 2px;
+  position: absolute;
+}
+
+.wifi-icon {
+  left: 299px;
+  top: 4px;
+  position: absolute;
+}
+
+.signal-bars {
+  left: 277px;
+  top: 4px;
+  position: absolute;
 }

@@ -1,0 +1,203 @@
+/* 기본 CSS 리셋 */
+* {
+  box-sizing: border-box;
+  margin: 0;
+  padding: 0;
+}
+@font-face {
+  font-family: 'SF Pro';
+  src: url('/fonts/SF-Pro.ttf') format('truetype');
+  font-weight: normal;
+  font-style: normal;
+}
+
+body {
+  font-family: 'SF Pro', system-ui, Arial, sans-serif;
+  min-height: 100vh;
+}
+
+/* 예시: 모바일 페이지 중앙 정렬 */
+.main-container {
+  width: 800px;
+  min-height: 874px;
+  margin: 0 auto;
+  background: #380d44;
+  overflow: hidden;
+  position: relative;
+}
+
+.luckychain-box {
+  width: 258px;
+  height: 61px;
+  position: absolute;
+  left: 110px;
+  top: 362px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: #fff;
+  font-size: 40px;
+  font-weight: bold;
+  font-family: 'SF Compact Rounded', Arial, sans-serif, 'SF Pro';
+  line-height: 18px;
+  background: transparent;
+}
+
+/* Admin mock button */
+.luckychain-btn {
+  display: inline-block;
+  padding: 12px 24px;
+  background: linear-gradient(90deg, #ff7a18 0%, #af002d 100%);
+  color: white;
+  border: none;
+  border-radius: 10px;
+  font-size: 20px;
+  font-weight: 700;
+  cursor: pointer;
+  box-shadow: 0 6px 18px rgba(0,0,0,0.25);
+  transition: transform 0.12s ease, box-shadow 0.12s ease, opacity 0.12s ease;
+}
+.luckychain-btn:hover {
+  transform: translateY(-2px);
+  box-shadow: 0 10px 24px rgba(0,0,0,0.3);
+}
+.luckychain-btn:active {
+  transform: translateY(0);
+  opacity: 0.95;
+}
+/* 전역 스크롤: html/body/#root 높이와 스크롤 처리 */
+html, body, #root {
+  height: 100%;
+}
+.main-container {width:100%;
+min-height: 100vh;
+margin: 0 auto;
+background: #380d44;
+overflow: auto;
+position: relative;
+}
+
+/* App layout: fixed topbar + scrollable content area */
+.app {
+  display: flex;
+  flex-direction: column;
+  height: 100vh; /* full viewport height */
+}
+.topbar {
+  flex: 0 0 auto;
+  background: transparent;
+  z-index: 1000;
+}
+.scroll-area {
+  flex: 1 1 auto;
+  overflow-y: auto;
+  -webkit-overflow-scrolling: touch;
+}
+
+:root {
+  --topbar-height: 56px; /* 헤더 높이를 필요에 따라 조정하세요 */
+}
+
+/* topbar가 차지하는 높이를 명시 */
+.topbar {
+  height: var(--topbar-height);
+  display: flex;
+  align-items: center; /* 버튼 수직 중앙 정렬 */
+  padding: 0 12px;
+  background: transparent;
+}
+
+/* main은 뷰포트에서 topbar 높이를 뺀 크기 */
+.scroll-area {
+  height: calc(100vh - var(--topbar-height));
+  /* 또는 flex 레이아웃 사용 시 flex: 1 1 auto; 로 두고 .page-container에 height 설정 */
+}
+
+/* 각 페이지 컴포넌트를 담는 컨테이너(실제 스크롤이 일어나는 곳) */
+.page-container {
+  height: 100%;         /* .scroll-area 높이를 채움 */
+  overflow-y: auto;     /* 내부에서만 스크롤 */
+  -webkit-overflow-scrolling: touch;
+  position: relative;   /* 절대 배치 요소가 내부 기준으로 위치하려면 필요 */
+  box-sizing: border-box;
+  display: flex;
+  justify-content: center;  /* 수평 중앙 정렬 */
+  align-items: flex-start;  /* 상단 정렬 */
+  padding: 0;               /* 패딩 제거 */
+}
+
+
+.selected-numbers {
+  padding: 20px;
+  text-align: center;
+  color: #fff;
+}
+
+.number-circle {
+  width: 40px;
+  height: 40px;
+  border-radius: 50%;
+  background-color: #6E0058;
+  color: white;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-weight: bold;
+}
+
+/* Mobile Header Styles */
+.mobile-header {
+  transform: translate(20px, 0.1px);
+  position: absolute;
+  top: 0;
+  left: 0;
+  width: 100%;
+  z-index: 1000;
+}
+
+.mobile-time {
+  left: 0.8px;
+  top: 4px;
+  position: absolute;
+  color: white;
+  font-size: 12px;
+  font-family: 'SF Pro Text', Arial, sans-serif;
+  font-weight: 600;
+  line-height: 3.1;
+  word-wrap: break-word;
+}
+
+.mobile-status-bar {
+  transform: translate(23px, 10px);
+  position: relative;
+}
+
+.battery-container {
+  left: 319.33px;
+  top: 4px;
+  position: absolute;
+}
+
+.battery-terminal {
+  left: 342.33px;
+  top: 7.67px;
+  position: absolute;
+}
+
+.battery-fill {
+  left: 321.33px;
+  top: 2px;
+  position: absolute;
+}
+
+.wifi-icon {
+  left: 299px;
+  top: 4px;
+  position: absolute;
+}
+
+.signal-bars {
+  left: 277px;
+  top: 4px;
+  position: absolute;
+}

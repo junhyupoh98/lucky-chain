@@ -333,15 +333,16 @@ function FortuneOpen({
              <div style={{
       width: 429,
       height: 90.07,
-      left: -20,
-      top: 300,          // -400 → 300 (흰색 박스 안으로)
+      left: -11,
+      top: 300,      
+          // -400 → 300 (흰색 박스 안으로)
       position: 'absolute',
       textAlign: 'center',
       justifyContent: 'center',
       display: 'flex',
       flexDirection: 'column',
       color: '#430303',
-      fontSize: 34,
+      fontSize: 20,
       fontFamily: 'SF Pro',
       fontWeight: '700',
       lineHeight: 1.3,

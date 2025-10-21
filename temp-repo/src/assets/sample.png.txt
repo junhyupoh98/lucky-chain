@@ -1,0 +1,1 @@
+(placeholder) Add a real PNG here at src/assets/sample.png for import usage. For testing you can copy an image file into this path. Alternatively, use public path /img/image14.svg created in public/img/.
