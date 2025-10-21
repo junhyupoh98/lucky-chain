@@ -20,7 +20,7 @@ import {
 } from 'react';
 import type { ReactNode } from 'react';
 
-import lottoAbi from '../../lib/abiV2.json';
+import lottoAbi from '../../lib/abi.json';
 import { contractConfig } from '../../lib/contractConfig';
 import { allowedAdminAddresses as staticAllowedAdmins } from '../../lib/adminConfig';
 

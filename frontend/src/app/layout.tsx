@@ -1,6 +1,6 @@
 import type { Metadata } from "next";
 import "./globals.css";
-import { AppProviders } from "./providers";
+import { AppProvidersV2 } from "./providers";
 
 export const metadata: Metadata = {
   title: "Lucky Chain Operator Console",
@@ -15,7 +15,7 @@ export default function RootLayout({
   return (
     <html lang="en">
       <body className="antialiased">
-        <AppProviders>{children}</AppProviders>
+        <AppProvidersV2>{children}</AppProvidersV2>
       </body>
     </html>
   );
