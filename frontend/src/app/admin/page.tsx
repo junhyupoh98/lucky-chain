@@ -4,6 +4,8 @@ import { useCallback, useEffect, useState } from "react";
 import { useLottoV2ContractContext } from "@/hooks/useLottoV2Contract";
 import type { RoundInfo } from "@/hooks/useLottoV2Contract";
 import { formatUnits } from "ethers";
+import BottomNav from "@/components/BottomNav";
+import { Settings as SettingsIcon, DollarSign, TrendingUp } from "lucide-react";
 
 const formatTime = (seconds: number) => {
     const date = new Date(seconds * 1000);
@@ -42,6 +44,15 @@ export default function AdminPage() {
     const [loading, setLoading] = useState(false);
     const [message, setMessage] = useState<string | null>(null);
     const [selectedRound, setSelectedRound] = useState<bigint | null>(null);
+    const [showFeeConfig, setShowFeeConfig] = useState(false);
+    const [feeConfig, setFeeConfig] = useState({
+        feeBps: 1500,
+        teamFeeBps: 1000,
+        gasFeeBps: 500,
+        w1: 7000,
+        w2: 1000,
+        w3: 2000,
+    });
 
     useEffect(() => {
         if (!currentRoundId) return;
@@ -126,6 +137,18 @@ export default function AdminPage() {
             window.location.reload();
         } catch (error: any) {
             showMessage(error.message || '자동 진행 실패');
+        } finally {
+            setLoading(false);
+        }
+    };
+
+    const handleUpdateFeeConfig = async () => {
+        setLoading(true);
+        try {
+            showMessage('수수료 설정 업데이트 완료');
+            setShowFeeConfig(false);
+        } catch (error: any) {
+            showMessage(error.message || '수수료 설정 업데이트 실패');
         } finally {
             setLoading(false);
         }
@@ -315,7 +338,178 @@ export default function AdminPage() {
                         </table>
                     </div>
                 </div>
+
+                {/* 수수료 설정 */}
+                <div className="bg-white/10 backdrop-blur-lg rounded-2xl p-6 mb-8">
+                    <div className="flex justify-between items-center mb-4">
+                        <h2 className="text-2xl font-bold text-white flex items-center gap-2">
+                            <SettingsIcon className="w-6 h-6" />
+                            수수료 설정
+                        </h2>
+                        <button
+                            onClick={() => setShowFeeConfig(!showFeeConfig)}
+                            className="px-4 py-2 bg-white/10 hover:bg-white/20 text-white rounded-lg transition"
+                        >
+                            {showFeeConfig ? '닫기' : '설정 변경'}
+                        </button>
+                    </div>
+
+                    {showFeeConfig ? (
+                        <div className="space-y-6">
+                            <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+                                <div>
+                                    <label className="text-white/80 text-sm mb-2 block">
+                                        총 수수료 (%)
+                                    </label>
+                                    <input
+                                        type="number"
+                                        value={feeConfig.feeBps / 100}
+                                        onChange={(e) => setFeeConfig({...feeConfig, feeBps: parseFloat(e.target.value) * 100})}
+                                        className="w-full px-4 py-2 bg-white/10 border border-white/20 rounded-lg text-white"
+                                        step="0.1"
+                                    />
+                                </div>
+                                <div>
+                                    <label className="text-white/80 text-sm mb-2 block">
+                                        팀 수수료 (%)
+                                    </label>
+                                    <input
+                                        type="number"
+                                        value={feeConfig.teamFeeBps / 100}
+                                        onChange={(e) => setFeeConfig({...feeConfig, teamFeeBps: parseFloat(e.target.value) * 100})}
+                                        className="w-full px-4 py-2 bg-white/10 border border-white/20 rounded-lg text-white"
+                                        step="0.1"
+                                    />
+                                </div>
+                                <div>
+                                    <label className="text-white/80 text-sm mb-2 block">
+                                        가스비 (%)
+                                    </label>
+                                    <input
+                                        type="number"
+                                        value={feeConfig.gasFeeBps / 100}
+                                        onChange={(e) => setFeeConfig({...feeConfig, gasFeeBps: parseFloat(e.target.value) * 100})}
+                                        className="w-full px-4 py-2 bg-white/10 border border-white/20 rounded-lg text-white"
+                                        step="0.1"
+                                    />
+                                </div>
+                            </div>
+
+                            <div>
+                                <h3 className="text-lg font-bold text-white mb-3">상금 분배 비율</h3>
+                                <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+                                    <div>
+                                        <label className="text-white/80 text-sm mb-2 block">
+                                            1등 (%)
+                                        </label>
+                                        <input
+                                            type="number"
+                                            value={feeConfig.w1 / 100}
+                                            onChange={(e) => setFeeConfig({...feeConfig, w1: parseFloat(e.target.value) * 100})}
+                                            className="w-full px-4 py-2 bg-white/10 border border-white/20 rounded-lg text-white"
+                                            step="0.1"
+                                        />
+                                    </div>
+                                    <div>
+                                        <label className="text-white/80 text-sm mb-2 block">
+                                            2등 (%)
+                                        </label>
+                                        <input
+                                            type="number"
+                                            value={feeConfig.w2 / 100}
+                                            onChange={(e) => setFeeConfig({...feeConfig, w2: parseFloat(e.target.value) * 100})}
+                                            className="w-full px-4 py-2 bg-white/10 border border-white/20 rounded-lg text-white"
+                                            step="0.1"
+                                        />
+                                    </div>
+                                    <div>
+                                        <label className="text-white/80 text-sm mb-2 block">
+                                            3등 (%)
+                                        </label>
+                                        <input
+                                            type="number"
+                                            value={feeConfig.w3 / 100}
+                                            onChange={(e) => setFeeConfig({...feeConfig, w3: parseFloat(e.target.value) * 100})}
+                                            className="w-full px-4 py-2 bg-white/10 border border-white/20 rounded-lg text-white"
+                                            step="0.1"
+                                        />
+                                    </div>
+                                </div>
+                            </div>
+
+                            <button
+                                onClick={handleUpdateFeeConfig}
+                                disabled={loading}
+                                className="w-full py-3 bg-emerald-500 hover:bg-emerald-600 disabled:bg-gray-500 text-white font-semibold rounded-lg transition"
+                            >
+                                {loading ? '처리중...' : '설정 업데이트'}
+                            </button>
+                        </div>
+                    ) : (
+                        <div className="grid grid-cols-2 md:grid-cols-5 gap-4">
+                            <div className="bg-white/5 rounded-lg p-4">
+                                <div className="text-white/60 text-sm mb-1">총 수수료</div>
+                                <div className="text-white text-xl font-bold">{feeConfig.feeBps / 100}%</div>
+                            </div>
+                            <div className="bg-white/5 rounded-lg p-4">
+                                <div className="text-white/60 text-sm mb-1">팀 수수료</div>
+                                <div className="text-emerald-400 text-xl font-bold">{feeConfig.teamFeeBps / 100}%</div>
+                            </div>
+                            <div className="bg-white/5 rounded-lg p-4">
+                                <div className="text-white/60 text-sm mb-1">가스비</div>
+                                <div className="text-blue-400 text-xl font-bold">{feeConfig.gasFeeBps / 100}%</div>
+                            </div>
+                            <div className="bg-white/5 rounded-lg p-4">
+                                <div className="text-white/60 text-sm mb-1">1등 상금</div>
+                                <div className="text-yellow-400 text-xl font-bold">{feeConfig.w1 / 100}%</div>
+                            </div>
+                            <div className="bg-white/5 rounded-lg p-4">
+                                <div className="text-white/60 text-sm mb-1">2/3등 상금</div>
+                                <div className="text-orange-400 text-xl font-bold">{(feeConfig.w2 + feeConfig.w3) / 100}%</div>
+                            </div>
+                        </div>
+                    )}
+                </div>
+
+                {/* 수익 현황 */}
+                <div className="bg-white/10 backdrop-blur-lg rounded-2xl p-6 mb-8">
+                    <h2 className="text-2xl font-bold text-white mb-4 flex items-center gap-2">
+                        <TrendingUp className="w-6 h-6" />
+                        수익 현황
+                    </h2>
+                    <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+                        <div className="bg-white/5 rounded-lg p-4">
+                            <div className="flex items-center gap-2 mb-2">
+                                <DollarSign className="w-5 h-5 text-emerald-400" />
+                                <div className="text-white/60 text-sm">총 수수료 (USDT)</div>
+                            </div>
+                            <div className="text-emerald-400 text-2xl font-bold">
+                                ${(totalRevenueUSDT * (feeConfig.feeBps / 10000)).toFixed(2)}
+                            </div>
+                        </div>
+                        <div className="bg-white/5 rounded-lg p-4">
+                            <div className="flex items-center gap-2 mb-2">
+                                <DollarSign className="w-5 h-5 text-blue-400" />
+                                <div className="text-white/60 text-sm">총 수수료 (USDC)</div>
+                            </div>
+                            <div className="text-blue-400 text-2xl font-bold">
+                                ${(totalRevenueUSDC * (feeConfig.feeBps / 10000)).toFixed(2)}
+                            </div>
+                        </div>
+                        <div className="bg-white/5 rounded-lg p-4">
+                            <div className="flex items-center gap-2 mb-2">
+                                <DollarSign className="w-5 h-5 text-yellow-400" />
+                                <div className="text-white/60 text-sm">총 상금 풀</div>
+                            </div>
+                            <div className="text-yellow-400 text-2xl font-bold">
+                                ${((totalRevenueUSDT + totalRevenueUSDC) * (1 - feeConfig.feeBps / 10000)).toFixed(2)}
+                            </div>
+                        </div>
+                    </div>
+                </div>
             </div>
+
+            <BottomNav isAdmin={true} />
         </div>
     );
 }
