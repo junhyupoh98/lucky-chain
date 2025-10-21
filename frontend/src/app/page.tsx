@@ -1,1404 +1,399 @@
 "use client";
 
-import { FormEvent, useCallback, useEffect, useMemo, useState } from "react";
-import { Interface, JsonRpcProvider, formatEther } from "ethers";
+import { useCallback, useEffect, useState } from "react";
+import { useLottoV2ContractContext } from "@/hooks/useLottoV2Contract";
+import type { RoundInfo, TicketData } from "@/hooks/useLottoV2Contract";
+import { parseUnits, formatUnits } from "ethers";
 
-import lottoAbi from "../../lib/abi.json";
-import RoundStatsGrid from "@/components/RoundStatsGrid";
-import { useLottoContractContext } from "@/hooks/useLottoContract";
-import type { RoundInfo, TicketData } from "@/hooks/useLottoContract";
-import { address as contractAddress, rpcUrl as contractRpcUrl } from "../../lib/contractConfig";
-
-const NUMBER_OF_PICKS = 6;
-const MIN_NUMBER = 1;
-const MAX_NUMBER = 45;
-const MAX_TICKETS_PER_PURCHASE = 50;
-
-const AUTO_DEFAULT_COUNT = 5;
-
-type SubmissionStatus = "idle" | "uploading" | "minting" | "success" | "error";
-type EntryMode = "manual" | "auto";
-
-type ManualTicketDraft = {
-    id: string;
-    numbers: number[];
-    luckyNumber: number | null;
+const formatTime = (seconds: number) => {
+    const date = new Date(seconds * 1000);
+    return date.toLocaleString('ko-KR', {
+        year: 'numeric',
+        month: 'long',
+        day: 'numeric',
+        hour: '2-digit',
+        minute: '2-digit',
+    });
 };
 
-type AutoTicketDraft = {
-    id: string;
-    numbers: number[];
-    luckyNumber: number;
-    signature: string;
+const formatCountdown = (seconds: number) => {
+    if (seconds <= 0) return '종료됨';
+    
+    const days = Math.floor(seconds / 86400);
+    const hours = Math.floor((seconds % 86400) / 3600);
+    const minutes = Math.floor((seconds % 3600) / 60);
+    
+    if (days > 0) return `${days}일 ${hours}시간`;
+    if (hours > 0) return `${hours}시간 ${minutes}분`;
+    return `${minutes}분`;
 };
 
-const createRandomId = () => {
-    if (typeof crypto !== "undefined" && "randomUUID" in crypto) {
-        return crypto.randomUUID();
-    }
-    return Math.random().toString(36).slice(2);
-};
-
-const createManualDraft = (): ManualTicketDraft => ({
-    id: createRandomId(),
-    numbers: [],
-    luckyNumber: null,
-});
-
-const makeSignature = (numbers: number[], luckyNumber: number) =>
-    `${numbers.join("-")}|${luckyNumber}`;
-
-function generateAutoTicket(existing: Set<string>): AutoTicketDraft {
-    const chosen = new Set<number>();
-
-    while (chosen.size < NUMBER_OF_PICKS) {
-        const value = Math.floor(Math.random() * MAX_NUMBER) + MIN_NUMBER;
-        chosen.add(value);
-    }
-
-    const numbers = Array.from(chosen).sort((a, b) => a - b);
-
-    let luckyNumber = Math.floor(Math.random() * MAX_NUMBER) + MIN_NUMBER;
-    while (chosen.has(luckyNumber)) {
-        luckyNumber = Math.floor(Math.random() * MAX_NUMBER) + MIN_NUMBER;
-    }
-
-    const signature = makeSignature(numbers, luckyNumber);
-    if (existing.has(signature)) {
-        return generateAutoTicket(existing);
-    }
-
-    existing.add(signature);
-
-    return {
-        id: createRandomId(),
-        numbers,
-        luckyNumber,
-        signature,
-    };
-}
-
-const generateAutoBatch = (count: number): AutoTicketDraft[] => {
-    const safeCount = Math.min(Math.max(Math.trunc(count) || 1, 1), MAX_TICKETS_PER_PURCHASE);
-    const seen = new Set<string>();
-    const tickets: AutoTicketDraft[] = [];
-
-    while (tickets.length < safeCount) {
-        tickets.push(generateAutoTicket(seen));
-    }
-
-    return tickets;
-};
-
-const extractErrorMessage = (error: unknown) => {
-    if (error instanceof Error && typeof error.message === "string") {
-        return error.message;
-    }
-
-    if (typeof error === "string") {
-        return error;
-    }
-
-    try {
-        return JSON.stringify(error);
-    } catch {
-        return "An unexpected error occurred.";
-    }
-};
-
-const describePhase = (phase?: string) => {
+const phaseText = (phase: string) => {
     switch (phase) {
-        case "sales":
-            return "Ticket sales";
-        case "drawing":
-            return "Drawing";
-        case "claimable":
-            return "Claimable";
-        default:
-            return phase ?? "—";
+        case 'sales': return '판매중';
+        case 'drawing': return '추첨중';
+        case 'claimable': return '당첨금 수령 가능';
+        default: return phase;
     }
 };
 
-type TicketMetadata = {
-    fortune?: string;
-    timestamp?: string;
-    [key: string]: unknown;
-};
-
-const IPFS_GATEWAY = "https://ipfs.io/ipfs/";
-
-const formatDuration = (totalSeconds: number): string => {
-    const abs = Math.max(0, Math.floor(totalSeconds));
-
-    const days = Math.floor(abs / 86_400);
-    const hours = Math.floor((abs % 86_400) / 3_600);
-    const minutes = Math.floor((abs % 3_600) / 60);
-    const seconds = abs % 60;
-
-    const segments: string[] = [];
-    if (days > 0) {
-        segments.push(`${days}d`);
-    }
-    if (hours > 0 || segments.length > 0) {
-        segments.push(`${hours}h`);
-    }
-    if (minutes > 0 || segments.length > 0) {
-        segments.push(`${minutes}m`);
-    }
-    if (segments.length < 2) {
-        segments.push(`${seconds}s`);
-    }
-
-    return segments.slice(0, 3).join(" ") || "0s";
-};
-
-const formatCountdownLabel = (diffSeconds: number, futurePrefix: string, pastPrefix: string) => {
-    if (!Number.isFinite(diffSeconds)) {
-        return null;
-    }
-
-    if (diffSeconds > 0) {
-        return `${futurePrefix} in ${formatDuration(diffSeconds)}`;
-    }
-    if (diffSeconds < 0) {
-        return `${pastPrefix} ${formatDuration(-diffSeconds)} ago`;
-    }
-
-    return `${futurePrefix} now`;
-};
-
-const formatTimestamp = (seconds?: number | null) => {
-    if (!seconds || seconds <= 0) {
-        return "—";
-    }
-
-    try {
-        return new Intl.DateTimeFormat(undefined, {
-            dateStyle: "medium",
-            timeStyle: "short",
-        }).format(new Date(seconds * 1000));
-    } catch {
-        return new Date(seconds * 1000).toISOString();
-    }
-};
-
-const resolveIpfsUri = (uri?: string | null) => {
-    if (!uri) {
-        return null;
-    }
-
-    if (uri.startsWith("ipfs://")) {
-        const path = uri.slice("ipfs://".length);
-        return `${IPFS_GATEWAY}${path}`;
-    }
-
-    return uri;
-};
-
-const FORTUNE_MESSAGES = [
-    "Lucky winds are shifting in your favor.",
-    "Your numbers unlock a door you didn't know existed.",
-    "A surprise ally will boost your chances soon.",
-    "Fortune favors the bold—stay the course.",
-    "Tiny risks today grow into giant rewards tomorrow.",
-    "An unexpected message will bring clarity.",
-    "Trust your instincts; they are sharper than luck.",
-    "Serendipity arrives when you least expect it.",
-    "Your lucky number wants to be the hero this round.",
-    "Collect good vibes—they compound like interest.",
-    "A calm mind spots the winning pattern first.",
-    "Your optimism is a magnet for jackpot energy.",
-];
-
-const generateFortune = (numbers: number[], luckyNumber: number, metadata?: TicketMetadata) => {
-    if (metadata && typeof metadata.fortune === "string" && metadata.fortune.trim().length > 0) {
-        return metadata.fortune.trim();
-    }
-
-    const signature = `${numbers.join("-")}|${luckyNumber}`;
-    const checksum = Array.from(signature).reduce((total, char) => total + char.charCodeAt(0), 0);
-    return FORTUNE_MESSAGES[checksum % FORTUNE_MESSAGES.length];
-};
-
-function ManualNumberButton({
-    value,
-    isSelected,
-    isLucky,
-    disabled,
-    onClick,
-}: {
-    value: number;
-    isSelected: boolean;
-    isLucky: boolean;
-    disabled?: boolean;
-    onClick: () => void;
-}) {
-    const base =
-        "rounded-md border px-2 py-1 text-sm font-semibold transition focus:outline-none focus:ring-2 focus:ring-emerald-400";
-    const variant = isLucky
-        ? "border-amber-400 bg-amber-500/20 text-amber-200"
-        : isSelected
-            ? "border-emerald-400 bg-emerald-500/20 text-emerald-200"
-            : "border-slate-700 text-slate-200 hover:border-emerald-400";
-    const state = disabled ? "cursor-not-allowed opacity-40" : "";
-
-    return (
-        <button
-            type="button"
-            onClick={onClick}
-            disabled={disabled}
-            className={`${base} ${variant} ${state}`.trim()}
-        >
-            {value}
-        </button>
-    );
-}
-
-function LuckyNumberButton({
-    value,
-    isLucky,
-    isMain,
-    onClick,
-}: {
-    value: number;
-    isLucky: boolean;
-    isMain: boolean;
-    onClick: () => void;
-}) {
-    const base =
-        "rounded-md border px-2 py-1 text-sm font-semibold transition focus:outline-none focus:ring-2 focus:ring-amber-400";
-    const variant = isLucky
-        ? "border-amber-400 bg-amber-500/20 text-amber-200"
-        : isMain
-            ? "border-emerald-400/60 text-emerald-200"
-            : "border-slate-700 text-slate-200 hover:border-amber-400";
-
-    return (
-        <button type="button" onClick={onClick} className={`${base} ${variant}`.trim()}>
-            {value}
-        </button>
-    );
-}
-
-export default function Home() {
+export default function LotteryPage() {
     const {
-        provider,
         address,
-        expectedChainId,
-        chainId,
+        isWrongNetwork,
         connectWallet,
         disconnectWallet,
-        isConnecting,
-        isWrongNetwork,
         switchToExpectedNetwork,
         getActiveRound,
-        getRoundInfo,
+        buyTicket,
         buyTickets,
-        isWalletAvailable,
-        getTicketData,
-        uploadMetadata,
-        pendingTransaction,
-        ticketPrice,
+        approveToken,
+        getTokenAllowance,
+        getTokenBalance,
         claimPrize,
-    } = useLottoContractContext();
+        getTicketData,
+        ticketPriceUSD,
+        pendingTransaction,
+        isWalletAvailable,
+    } = useLottoV2ContractContext();
 
-    const [entryMode, setEntryMode] = useState<EntryMode>("manual");
-    const [manualTickets, setManualTickets] = useState<ManualTicketDraft[]>([createManualDraft()]);
-    const [autoTickets, setAutoTickets] = useState<AutoTicketDraft[]>(() =>
-        generateAutoBatch(AUTO_DEFAULT_COUNT),
-    );
-    const [autoCount, setAutoCount] = useState<number>(AUTO_DEFAULT_COUNT);
-
-    const [status, setStatus] = useState<SubmissionStatus>("idle");
-    const [errorMessage, setErrorMessage] = useState<string | null>(null);
-    const [transactionHash, setTransactionHash] = useState<string | null>(null);
-    const [successTokenIds, setSuccessTokenIds] = useState<string[]>([]);
-    const [latestTickets, setLatestTickets] = useState<TicketData[]>([]);
     const [activeRound, setActiveRound] = useState<RoundInfo | null>(null);
-    const [resolvedName, setResolvedName] = useState<string | null>(null);
-    const [walletBalance, setWalletBalance] = useState<string | null>(null);
-    const [networkLabel, setNetworkLabel] = useState<string | null>(null);
-    const [roundCountdown, setRoundCountdown] = useState<{ startLabel: string | null; endLabel: string | null }>(
-        {
-            startLabel: null,
-            endLabel: null,
-        },
-    );
-    const [metadataByTicket, setMetadataByTicket] = useState<Record<string, TicketMetadata>>({});
-    const [roundInfoCache, setRoundInfoCache] = useState<Record<string, RoundInfo>>({});
-    const [claimingTicketId, setClaimingTicketId] = useState<string | null>(null);
-    const [autoSeed, setAutoSeed] = useState<number>(Date.now());
-    const [toastMessage, setToastMessage] = useState<string | null>(null);
-
-    const currentTicketCount = entryMode === "manual" ? manualTickets.length : autoTickets.length;
-    const totalCost = useMemo(() => {
-        if (!ticketPrice) {
-            return null;
-        }
-
-        try {
-            return Number(ticketPrice) * currentTicketCount;
-        } catch (error) {
-            console.error("Failed to compute total cost", error);
-            return null;
-        }
-    }, [ticketPrice, currentTicketCount]);
-
-    const fallbackProvider = useMemo(() => {
-        const url = contractRpcUrl?.trim() || "https://public-en-kairos.node.kaia.io";
-
-        try {
-            return new JsonRpcProvider(url);
-        } catch (error) {
-            console.warn("Failed to create fallback provider", error);
-            return null;
-        }
-    }, [contractRpcUrl]);
+    const [useUSDT, setUseUSDT] = useState(true);
+    const [ticketCount, setTicketCount] = useState(1);
+    const [myTickets, setMyTickets] = useState<TicketData[]>([]);
+    const [loading, setLoading] = useState(false);
+    const [message, setMessage] = useState<string | null>(null);
+    const [countdown, setCountdown] = useState<string>('');
+    const [tokenBalance, setTokenBalance] = useState<string>('0');
+    const [tokenAllowance, setTokenAllowance] = useState<bigint>(0n);
 
     useEffect(() => {
-        const loadRoundInfo = async () => {
-            try {
-                const round = await getActiveRound();
-                setActiveRound(round);
-                if (round) {
-                    const key = round.id.toString();
-                    setRoundInfoCache((previous) => ({
-                        ...previous,
-                        [key]: round,
-                    }));
-                }
-            } catch (error) {
-                console.error("Failed to load round info", error);
-            }
+        const load = async () => {
+            const round = await getActiveRound();
+            setActiveRound(round);
         };
-
-        void loadRoundInfo();
+        load();
     }, [getActiveRound]);
 
     useEffect(() => {
-        if ((!provider && !fallbackProvider) || !address) {
-            setResolvedName(null);
-            setWalletBalance(null);
-            return;
-        }
+        if (!activeRound) return;
 
-        let cancelled = false;
-
-        const providersToTry = [fallbackProvider, provider].filter(
-            (candidate): candidate is NonNullable<typeof provider> | JsonRpcProvider => candidate != null,
-        );
-
-        const loadWalletInfo = async () => {
-            let lastError: unknown = null;
-
-            for (const currentProvider of providersToTry) {
-                try {
-                    const [nameResult, balanceResult] = await Promise.all([
-                        currentProvider.lookupAddress(address).catch(() => null),
-                        currentProvider.getBalance(address),
-                    ]);
-
-                    if (!cancelled) {
-                        setResolvedName(typeof nameResult === "string" ? nameResult : null);
-                        setWalletBalance(formatEther(balanceResult));
-                    }
-                    return;
-                } catch (error) {
-                    lastError = error;
-                }
-            }
-
-            if (!cancelled) {
-                setResolvedName(null);
-                setWalletBalance(null);
-            }
-
-            if (!cancelled && lastError) {
-                const message = extractErrorMessage(lastError);
-                const detail = message ? `: ${message}` : "";
-                console.warn(`Failed to load wallet info via available providers${detail}`, lastError);
-            }
-        };
-
-        void loadWalletInfo();
-
-        return () => {
-            cancelled = true;
-        };
-    }, [provider, address, fallbackProvider]);
-
-    useEffect(() => {
-        if (!provider) {
-            setNetworkLabel(null);
-            return;
-        }
-
-        let cancelled = false;
-
-        const loadNetwork = async () => {
-            try {
-                const network = await provider.getNetwork();
-                if (!cancelled) {
-                    const label =
-                        network?.name && network.name !== "unknown"
-                            ? `${network.name} (#${network.chainId})`
-                            : network?.chainId
-                                ? `Chain #${network.chainId}`
-                                : null;
-                    setNetworkLabel(label);
-                }
-            } catch (error) {
-                console.error("Failed to load network info", error);
-                if (!cancelled) {
-                    setNetworkLabel(chainId != null ? `Chain #${chainId}` : null);
-                }
-            }
-        };
-
-        void loadNetwork();
-
-        return () => {
-            cancelled = true;
-        };
-    }, [provider, chainId]);
-
-    useEffect(() => {
-        if (!activeRound) {
-            setRoundCountdown({ startLabel: null, endLabel: null });
-            return;
-        }
-
-        let cancelled = false;
-
-        const updateCountdown = () => {
+        const update = () => {
             const now = Math.floor(Date.now() / 1000);
-            const startDiff = activeRound.startTime - now;
-            const endDiff = activeRound.endTime - now;
-
-            const startLabel = formatCountdownLabel(startDiff, "Starts", "Started");
-            const endLabel = formatCountdownLabel(endDiff, "Closes", "Closed");
-
-            if (!cancelled) {
-                setRoundCountdown({ startLabel, endLabel });
-            }
+            const remaining = activeRound.endTime - now;
+            setCountdown(formatCountdown(remaining));
         };
 
-        updateCountdown();
-        const timer = window.setInterval(updateCountdown, 1000);
-
-        return () => {
-            cancelled = true;
-            window.clearInterval(timer);
-        };
+        update();
+        const timer = setInterval(update, 1000);
+        return () => clearInterval(timer);
     }, [activeRound]);
 
     useEffect(() => {
-        if (!toastMessage) {
-            return;
-        }
+        if (!address) return;
 
-        const timeout = window.setTimeout(() => {
-            setToastMessage(null);
-        }, 4000);
-
-        return () => {
-            window.clearTimeout(timeout);
+        const load = async () => {
+            const balance = await getTokenBalance(useUSDT);
+            setTokenBalance(formatUnits(balance, 6));
+            
+            const allowance = await getTokenAllowance(useUSDT);
+            setTokenAllowance(allowance);
         };
-    }, [toastMessage]);
+        load();
+    }, [address, useUSDT, getTokenBalance, getTokenAllowance]);
 
-    useEffect(() => {
-        setAutoTickets(generateAutoBatch(autoCount));
-    }, [autoSeed, autoCount]);
-
-    useEffect(() => {
-        if (latestTickets.length === 0) {
-            return;
-        }
-
-        const pendingMetadata = latestTickets.filter(
-            (ticket) => ticket.tokenURI && !metadataByTicket[ticket.id],
-        );
-
-        if (pendingMetadata.length === 0) {
-            return;
-        }
-
-        let cancelled = false;
-
-        void (async () => {
-            const entries = await Promise.all(
-                pendingMetadata.map(async (ticket) => {
-                    const url = resolveIpfsUri(ticket.tokenURI);
-                    if (!url) {
-                        return null;
-                    }
-
-                    try {
-                        const response = await fetch(url);
-                        if (!response.ok) {
-                            throw new Error(`Metadata request failed with status ${response.status}`);
-                        }
-                        const data = (await response.json()) as TicketMetadata;
-                        return { id: ticket.id, data };
-                    } catch (error) {
-                        console.error("Failed to load ticket metadata", error);
-                        return null;
-                    }
-                }),
-            );
-
-            if (!cancelled) {
-                setMetadataByTicket((previous) => {
-                    const next = { ...previous };
-                    for (const entry of entries) {
-                        if (entry?.data) {
-                            next[entry.id] = entry.data;
-                        }
-                    }
-                    return next;
-                });
-            }
-        })();
-
-        return () => {
-            cancelled = true;
-        };
-    }, [latestTickets, metadataByTicket]);
-
-    useEffect(() => {
-        if (latestTickets.length === 0) {
-            return;
-        }
-
-        const uniqueRoundIds = Array.from(
-            new Set(latestTickets.map((ticket) => ticket.roundId)),
-        ).filter((roundId) => !roundInfoCache[roundId]);
-
-        if (uniqueRoundIds.length === 0) {
-            return;
-        }
-
-        let cancelled = false;
-
-        void (async () => {
-            const entries = await Promise.all(
-                uniqueRoundIds.map(async (roundId) => {
-                    try {
-                        const info = await getRoundInfo(BigInt(roundId));
-                        if (info) {
-                            return { roundId, info };
-                        }
-                    } catch (error) {
-                        console.error("Failed to fetch round info for ticket", error);
-                    }
-                    return null;
-                }),
-            );
-
-            if (!cancelled) {
-                setRoundInfoCache((previous) => {
-                    const next = { ...previous };
-                    for (const entry of entries) {
-                        if (entry?.info) {
-                            next[entry.roundId] = entry.info;
-                        }
-                    }
-                    return next;
-                });
-            }
-        })();
-
-        return () => {
-            cancelled = true;
-        };
-    }, [latestTickets, roundInfoCache, getRoundInfo]);
-
-    const toggleManualNumber = (ticketId: string, value: number) => {
-        setManualTickets((drafts) =>
-            drafts.map((draft) => {
-                if (draft.id !== ticketId) return draft;
-                const alreadySelected = draft.numbers.includes(value);
-
-                if (alreadySelected) {
-                    return { ...draft, numbers: draft.numbers.filter((n) => n !== value) };
-                }
-
-                if (draft.numbers.length >= NUMBER_OF_PICKS) {
-                    return draft;
-                }
-
-                return {
-                    ...draft,
-                    numbers: [...draft.numbers, value].sort((a, b) => a - b),
-                };
-            }),
-        );
+    const showMessage = (msg: string) => {
+        setMessage(msg);
+        setTimeout(() => setMessage(null), 4000);
     };
 
-    const setManualLuckyNumber = (ticketId: string, value: number) => {
-        setManualTickets((drafts) =>
-            drafts.map((draft) => {
-                if (draft.id !== ticketId) return draft;
-                return { ...draft, luckyNumber: draft.luckyNumber === value ? null : value };
-            }),
-        );
-    };
-
-    const addManualTicket = () => {
-        setManualTickets((drafts) => {
-            if (drafts.length >= MAX_TICKETS_PER_PURCHASE) {
-                return drafts;
-            }
-            return [...drafts, createManualDraft()];
-        });
-    };
-
-    const removeManualTicket = (ticketId: string) => {
-        setManualTickets((drafts) => {
-            if (drafts.length <= 1) {
-                return drafts;
-            }
-            return drafts.filter((draft) => draft.id !== ticketId);
-        });
-    };
-
-    const resetAutoTickets = () => {
-        setAutoSeed(Date.now());
-    };
-
-    const isManualTicketValid = (ticket: ManualTicketDraft) => {
-        if (ticket.numbers.length !== NUMBER_OF_PICKS) {
-            return false;
-        }
-        if (ticket.luckyNumber == null) {
-            return false;
-        }
-        return true;
-    };
-
-    const manualTicketErrors = useMemo(() => {
-        const errors = new Map<string, string>();
-
-        manualTickets.forEach((ticket, index) => {
-            if (!isManualTicketValid(ticket)) {
-                errors.set(ticket.id, "Complete all numbers and lucky number");
-                return;
-            }
-
-            const numbersSet = new Set(ticket.numbers);
-            if (numbersSet.size !== ticket.numbers.length) {
-                errors.set(ticket.id, "Numbers must be unique");
-            }
-
-            if (numbersSet.has(ticket.luckyNumber!)) {
-                errors.set(ticket.id, "Lucky number must differ from main numbers");
-            }
-
-            for (let i = 0; i < manualTickets.length; i++) {
-                if (i === index) continue;
-                const other = manualTickets[i];
-                if (!isManualTicketValid(other)) continue;
-
-                if (makeSignature(other.numbers, other.luckyNumber!).includes(ticket.id)) {
-                    continue;
-                }
-
-                const sameNumbers =
-                    other.numbers.length === ticket.numbers.length &&
-                    other.numbers.every((value, idx) => value === ticket.numbers[idx]);
-                const sameLucky = other.luckyNumber === ticket.luckyNumber;
-
-                if (sameNumbers && sameLucky) {
-                    errors.set(ticket.id, "Duplicate ticket detected");
-                }
-            }
-        });
-
-        return errors;
-    }, [manualTickets]);
-
-    const hasManualErrors = manualTickets.some((ticket) => manualTicketErrors.has(ticket.id));
-
-    const totalPriceDisplay = useMemo(() => {
-        if (!ticketPrice) {
-            return "—";
-        }
-        if (!totalCost) {
-            return "—";
-        }
-        return `${totalCost} KAIA`;
-    }, [ticketPrice, totalCost]);
-
-    const handleConnectWallet = async () => {
+    const handleApprove = async () => {
+        setLoading(true);
         try {
-            setToastMessage(null);
-            await connectWallet();
-        } catch (error) {
-            console.error("Failed to connect wallet", error);
-            setToastMessage(extractErrorMessage(error));
+            const amount = parseUnits((parseFloat(ticketPriceUSD) * ticketCount).toString(), 6);
+            await approveToken(useUSDT, amount);
+            showMessage('승인 완료!');
+            
+            const allowance = await getTokenAllowance(useUSDT);
+            setTokenAllowance(allowance);
+        } catch (error: any) {
+            showMessage(error.message || '승인 실패');
+        } finally {
+            setLoading(false);
         }
     };
 
-    const handleDisconnectWallet = async () => {
+    const handleBuyTickets = async () => {
+        setLoading(true);
         try {
-            setToastMessage(null);
-            await disconnectWallet();
-        } catch (error) {
-            console.error("Failed to disconnect wallet", error);
-            setToastMessage(extractErrorMessage(error));
+            const uris = Array(ticketCount).fill('ipfs://placeholder');
+            
+            if (ticketCount === 1) {
+                await buyTicket(useUSDT, uris[0]);
+            } else {
+                await buyTickets(useUSDT, ticketCount, uris);
+            }
+            
+            showMessage(`${ticketCount}장 구매 완료!`);
+            setTicketCount(1);
+            
+            const round = await getActiveRound();
+            setActiveRound(round);
+        } catch (error: any) {
+            showMessage(error.message || '구매 실패');
+        } finally {
+            setLoading(false);
         }
     };
 
-    const handleClaimPrize = useCallback(
-        async (ticket: TicketData) => {
-            try {
-                setToastMessage(null);
-                setClaimingTicketId(ticket.id);
-                const receipt = await claimPrize(BigInt(ticket.id));
-                if (receipt) {
-                    setLatestTickets((previous) =>
-                        previous.map((entry) =>
-                            entry.id === ticket.id
-                                ? { ...entry, claimed: true }
-                                : entry,
-                        ),
-                    );
-                    setToastMessage("Prize claimed successfully.");
-                }
-            } catch (error) {
-                console.error("Failed to claim prize", error);
-                setToastMessage(extractErrorMessage(error));
-            } finally {
-                setClaimingTicketId(null);
-            }
-        },
-        [claimPrize],
-    );
+    const needsApproval = tokenAllowance < parseUnits((parseFloat(ticketPriceUSD) * ticketCount).toString(), 6);
 
-    const handleSubmit = async (event: FormEvent<HTMLFormElement>) => {
-        event.preventDefault();
-
-        if (!address) {
-            setErrorMessage("Connect your wallet to purchase tickets.");
-            return;
-        }
-
-        if (entryMode === "manual" && hasManualErrors) {
-            setErrorMessage("Resolve highlighted ticket errors before submitting.");
-            return;
-        }
-
-        try {
-            setStatus("uploading");
-            setErrorMessage(null);
-            setTransactionHash(null);
-            setSuccessTokenIds([]);
-
-            const ticketsToPurchase =
-                entryMode === "manual"
-                    ? manualTickets.map((ticket) => ({
-                        numbers: ticket.numbers,
-                        luckyNumber: ticket.luckyNumber!,
-                        isAutoPick: false,
-                    }))
-                    : autoTickets.map((ticket) => ({
-                        numbers: ticket.numbers,
-                        luckyNumber: ticket.luckyNumber,
-                        isAutoPick: true,
-                    }));
-
-            const metadataPayloads = ticketsToPurchase.map((ticket) => ({
-                numbers: ticket.numbers,
-                luckyNumber: ticket.luckyNumber,
-                address,
-                isAutoPick: ticket.isAutoPick,
-            }));
-
-            const metadataResults = await uploadMetadata(metadataPayloads);
-
-            if (!metadataResults.every((result) => result.success && result.uri)) {
-                throw new Error("Metadata upload failed for one or more tickets.");
-            }
-
-            setStatus("minting");
-
-            const ticketsWithMetadata = ticketsToPurchase.map((ticket, index) => ({
-                numbers: ticket.numbers,
-                luckyNumber: ticket.luckyNumber,
-                isAutoPick: ticket.isAutoPick,
-                tokenURI: metadataResults[index]?.uri!,
-            }));
-
-            const receipt = await buyTickets(ticketsWithMetadata);
-
-            if (receipt) {
-                setTransactionHash(receipt.hash);
-                const iface = new Interface(lottoAbi);
-
-                const ticketIds: string[] = [];
-
-                for (const log of receipt.logs ?? []) {
-                    try {
-                        const parsed = iface.parseLog(log);
-                        if (parsed?.name === "TicketPurchased") {
-                            const tokenId = parsed.args?.tokenId;
-                            if (tokenId != null) {
-                                ticketIds.push(tokenId.toString());
-                            }
-                        }
-                    } catch (error) {
-                        console.error("Failed to parse log", error);
-                    }
-                }
-
-                setSuccessTokenIds(ticketIds);
-
-                if (entryMode === "auto") {
-                    resetAutoTickets();
-                }
-
-                const fetched = await Promise.all(
-                    ticketIds.map(async (tokenId) => {
-                        try {
-                            return await getTicketData(BigInt(tokenId));
-                        } catch (error) {
-                            console.error("Failed to load minted ticket", error);
-                            return null;
-                        }
-                    }),
-                );
-
-                setLatestTickets(fetched.filter((ticket): ticket is TicketData => Boolean(ticket)));
-            }
-        } catch (error) {
-            console.error("Ticket purchase failed", error);
-            setStatus("error");
-            setErrorMessage(error instanceof Error ? error.message : "Ticket purchase failed.");
-        }
-    };
+    if (!isWalletAvailable) {
+        return (
+            <div className="min-h-screen bg-gradient-to-br from-purple-900 via-blue-900 to-indigo-900 flex items-center justify-center p-4">
+                <div className="bg-white/10 backdrop-blur-lg rounded-2xl p-8 max-w-md w-full text-center">
+                    <h1 className="text-2xl font-bold text-white mb-4">지갑이 필요합니다</h1>
+                    <p className="text-white/80">MetaMask 또는 다른 Web3 지갑을 설치해주세요.</p>
+                </div>
+            </div>
+        );
+    }
 
     return (
-        <main className="min-h-screen bg-slate-950 text-slate-100">
-            <div className="mx-auto flex w-full max-w-4xl flex-col gap-6 px-4 py-12">
-                <header className="flex flex-col gap-2">
-                    <h1 className="text-4xl font-semibold">Lucky Chain Lottery</h1>
-                    <p className="text-sm text-slate-400">
-                        Purchase weekly NFT tickets with six numbers and a lucky bonus number. Choose your own picks or let the
-system
-                        generate a random ticket for you.
-                    </p>
+        <div className="min-h-screen bg-gradient-to-br from-purple-900 via-blue-900 to-indigo-900">
+            <div className="container mx-auto px-4 py-6 max-w-6xl">
+                <header className="mb-8">
+                    <div className="flex flex-col sm:flex-row justify-between items-center gap-4">
+                        <h1 className="text-3xl sm:text-4xl font-bold text-white">🎰 럭키 체인</h1>
+                        
+                        {!address ? (
+                            <button
+                                onClick={connectWallet}
+                                className="px-6 py-3 bg-emerald-500 hover:bg-emerald-600 text-white font-semibold rounded-lg transition"
+                            >
+                                지갑 연결
+                            </button>
+                        ) : isWrongNetwork ? (
+                            <button
+                                onClick={switchToExpectedNetwork}
+                                className="px-6 py-3 bg-orange-500 hover:bg-orange-600 text-white font-semibold rounded-lg transition"
+                            >
+                                네트워크 전환
+                            </button>
+                        ) : (
+                            <div className="flex items-center gap-3">
+                                <div className="text-white/90 text-sm">
+                                    {address.slice(0, 6)}...{address.slice(-4)}
+                                </div>
+                                <button
+                                    onClick={disconnectWallet}
+                                    className="px-4 py-2 bg-white/10 hover:bg-white/20 text-white rounded-lg transition text-sm"
+                                >
+                                    연결 해제
+                                </button>
+                            </div>
+                        )}
+                    </div>
                 </header>
 
-                <section className="rounded-xl border border-slate-800 bg-slate-900/60 p-6">
-                    <h2 className="text-lg font-semibold">Wallet status</h2>
-                    <div className="mt-3 flex flex-wrap gap-2 text-xs font-semibold">
-                        <span
-                            className={`inline-flex items-center rounded-full border px-3 py-1 ${
-                                address
-                                    ? "border-emerald-400/60 bg-emerald-500/10 text-emerald-200"
-                                    : "border-slate-700 bg-slate-800 text-slate-300"
-                            }`}
-                        >
-                            {address ? "Wallet connected" : "Wallet disconnected"}
-                        </span>
-                        <span
-                            className={`inline-flex items-center rounded-full border px-3 py-1 ${
-                                isWrongNetwork
-                                    ? "border-red-400/60 bg-red-500/10 text-red-200"
-                                    : "border-emerald-400/60 bg-emerald-500/10 text-emerald-200"
-                            }`}
-                        >
-                            {isWrongNetwork
-                                ? `Wrong network (expected ${expectedChainId})`
-                                : "Network ready"}
-                        </span>
-                        {activeRound && (
-                            <span className="inline-flex items-center rounded-full border border-amber-400/60 bg-amber-500/10 px-3 py-1 text-amber-200">
-                                Round {activeRound.id.toString()} · {describePhase(activeRound.phase)}
-                            </span>
-                        )}
+                {message && (
+                    <div className="mb-6 p-4 bg-emerald-500/20 border border-emerald-500/50 rounded-lg text-white text-center">
+                        {message}
                     </div>
-                    <div className="mt-4 grid gap-2 text-sm text-slate-300 md:grid-cols-2">
-                        <div>
-                            <span className="font-medium text-slate-200">Address:</span>{" "}
-                            {address ?? "Not connected"}
-                            {resolvedName && (
-                                <p className="text-xs text-slate-500">Resolved as {resolvedName}</p>
+                )}
+
+                {activeRound && (
+                    <div className="grid grid-cols-1 lg:grid-cols-3 gap-6 mb-8">
+                        <div className="lg:col-span-2 bg-white/10 backdrop-blur-lg rounded-2xl p-6">
+                            <h2 className="text-2xl font-bold text-white mb-4">현재 회차</h2>
+                            
+                            <div className="grid grid-cols-2 gap-4 mb-6">
+                                <div>
+                                    <div className="text-white/60 text-sm mb-1">회차 번호</div>
+                                    <div className="text-white text-xl font-bold">#{activeRound.id.toString()}</div>
+                                </div>
+                                <div>
+                                    <div className="text-white/60 text-sm mb-1">상태</div>
+                                    <div className="text-white text-xl font-bold">{phaseText(activeRound.phase)}</div>
+                                </div>
+                                <div>
+                                    <div className="text-white/60 text-sm mb-1">남은 시간</div>
+                                    <div className="text-white text-xl font-bold">{countdown}</div>
+                                </div>
+                                <div>
+                                    <div className="text-white/60 text-sm mb-1">판매된 티켓</div>
+                                    <div className="text-white text-xl font-bold">{activeRound.ticketCount.toString()}장</div>
+                                </div>
+                            </div>
+
+                            <div className="border-t border-white/20 pt-4">
+                                <div className="text-white/60 text-sm mb-2">총 상금 풀</div>
+                                <div className="flex gap-4">
+                                    <div>
+                                        <span className="text-emerald-400 font-bold text-lg">
+                                            ${formatUnits(activeRound.grossUSDT + activeRound.carryInUSDT, 6)}
+                                        </span>
+                                        <span className="text-white/60 text-sm ml-2">USDT</span>
+                                    </div>
+                                    <div>
+                                        <span className="text-blue-400 font-bold text-lg">
+                                            ${formatUnits(activeRound.grossUSDC + activeRound.carryInUSDC, 6)}
+                                        </span>
+                                        <span className="text-white/60 text-sm ml-2">USDC</span>
+                                    </div>
+                                </div>
+                            </div>
+
+                            {activeRound.phase === 'claimable' && activeRound.winningNumbers.length > 0 && (
+                                <div className="mt-6 p-4 bg-yellow-500/20 border border-yellow-500/50 rounded-lg">
+                                    <div className="text-white font-semibold mb-2">당첨 번호</div>
+                                    <div className="flex gap-2 flex-wrap">
+                                        {activeRound.winningNumbers.map((num, i) => (
+                                            <div key={i} className="w-10 h-10 bg-white rounded-full flex items-center justify-center font-bold text-purple-900">
+                                                {num}
+                                            </div>
+                                        ))}
+                                        <div className="w-10 h-10 bg-yellow-400 rounded-full flex items-center justify-center font-bold text-purple-900">
+                                            {activeRound.luckyNumber}
+                                        </div>
+                                    </div>
+                                </div>
                             )}
                         </div>
-                        <div>
-                            <span className="font-medium text-slate-200">Balance:</span>{" "}
-                            {walletBalance ? `${walletBalance} KAIA` : "—"}
-                        </div>
-                        <div>
-                            <span className="font-medium text-slate-200">Network:</span>{" "}
-                            {networkLabel ?? "—"}
-                        </div>
-                        <div>
-                            <span className="font-medium text-slate-200">Ticket price:</span>{" "}
-                            {ticketPrice ? `${ticketPrice} KAIA` : "—"}
-                        </div>
-                        <div>
-                            <span className="font-medium text-slate-200">Active round:</span>{" "}
-                            {activeRound
-                                ? `${activeRound.id.toString()} (${describePhase(activeRound.phase)})`
-                                : "—"}
-                        </div>
-                        <div>
-                            <span className="font-medium text-slate-200">Pending tx:</span>{" "}
-                            {pendingTransaction ?? "—"}
-                        </div>
-                        <div className="md:col-span-2">
-                            <span className="font-medium text-slate-200">Round timers:</span>
-                            <div className="mt-1 space-y-1 text-xs text-slate-400">
-                                <div>Start: {roundCountdown.startLabel ?? "—"}</div>
-                                <div>Close: {roundCountdown.endLabel ?? "—"}</div>
-                            </div>
-                        </div>
-                    </div>
-                    <div className="mt-4 flex flex-wrap gap-3">
-                        {!isWalletAvailable && <p className="text-sm text-red-400">No wallet detected.</p>}
-                        <button
-                            type="button"
-                            onClick={() => void handleConnectWallet()}
-                            disabled={isConnecting || !provider}
-                            className="rounded-lg bg-emerald-500 px-4 py-2 text-sm font-semibold text-emerald-950 transition hover:bg-emerald-400 disabled:cursor-not-allowed disabled:opacity-60"
-                        >
-                            {isConnecting ? "Connecting…" : "Connect wallet"}
-                        </button>
-                        <button
-                            type="button"
-                            onClick={() => void handleDisconnectWallet()}
-                            disabled={!address}
-                            className="rounded-lg border border-slate-700 px-4 py-2 text-sm font-semibold text-slate-200 transition hover:border-red-400 hover:text-red-200 disabled:cursor-not-allowed disabled:opacity-60"
-                        >
-                            Disconnect
-                        </button>
-                        {isWrongNetwork && (
-                            <button
-                                type="button"
-                                onClick={() => void switchToExpectedNetwork()}
-                                className="rounded-lg border border-amber-400 px-4 py-2 text-sm font-semibold text-amber-200 transition hover:bg-amber-500/20"
-                            >
-                                Switch network
-                            </button>
-                        )}
-                    </div>
-                </section>
 
-                <section className="rounded-xl border border-slate-800 bg-slate-900/60 p-6">
-                    <div className="flex flex-col gap-2">
-                        <h2 className="text-lg font-semibold">Round snapshot</h2>
-                        <p className="text-sm text-slate-400">
-                            {activeRound
-                                ? `Tracking round #${activeRound.id.toString()} (${describePhase(activeRound.phase)})`
-                                : "No active round detected."}
-                        </p>
-                    </div>
-                    <RoundStatsGrid round={activeRound} className="mt-4" />
-                </section>
-
-                <section className="rounded-xl border border-slate-800 bg-slate-900/60 p-6">
-                    <h2 className="text-lg font-semibold">Choose numbers</h2>
-                    <div className="mt-3 flex gap-3 text-sm">
-                        <button
-                            type="button"
-                            className={`rounded-lg px-3 py-1 font-semibold transition ${
-                                entryMode === "manual"
-                                    ? "bg-emerald-500 text-emerald-950"
-                                    : "border border-slate-800 text-slate-200 hover:border-emerald-400"
-                            }`}
-                            onClick={() => setEntryMode("manual")}
-                        >
-                            Manual pick
-                        </button>
-                        <button
-                            type="button"
-                            className={`rounded-lg px-3 py-1 font-semibold transition ${
-                                entryMode === "auto"
-                                    ? "bg-emerald-500 text-emerald-950"
-                                    : "border border-slate-800 text-slate-200 hover:border-emerald-400"
-                            }`}
-                            onClick={() => setEntryMode("auto")}
-                        >
-                            Auto pick
-                        </button>
-                    </div>
-
-                    <div className="mt-4 text-sm text-slate-300">
-                        <p>
-                            Ticket price per entry:{" "}
-                            <strong className="text-slate-100">
-                                {ticketPrice ? `${ticketPrice} KAIA` : "—"}
-                            </strong>
-                        </p>
-                        <p className="mt-1">
-                            Total cost for this purchase:{" "}
-                            <strong className="text-slate-100">{totalPriceDisplay}</strong>
-                        </p>
-                    </div>
-
-                    {entryMode === "manual" ? (
-                        <div className="mt-6 space-y-6">
-                            <div className="flex flex-wrap items-center justify-between gap-3">
-                                <div>
-                                    <p className="text-sm text-slate-300">
-                                        Select up to {MAX_TICKETS_PER_PURCHASE} tickets. Each ticket needs{" "}
-                                        {NUMBER_OF_PICKS} unique numbers between {MIN_NUMBER} and {MAX_NUMBER}, plus a lucky
-number.
-                                    </p>
-                                </div>
-                                <div className="flex gap-2">
-                                    <button
-                                        type="button"
-                                        onClick={addManualTicket}
-                                        disabled={manualTickets.length >= MAX_TICKETS_PER_PURCHASE}
-                                        className="rounded-lg border border-emerald-400 px-3 py-1 text-sm font-semibold text-emerald-200 transition hover:bg-emerald-500/10 disabled:cursor-not-allowed disabled:opacity-50"
-                                    >
-                                        Add ticket
-                                    </button>
-                                </div>
-                            </div>
-
-                            <div className="space-y-6">
-                                {manualTickets.map((ticket, index) => {
-                                    const error = manualTicketErrors.get(ticket.id);
-
-                                    return (
-                                        <div
-                                            key={ticket.id}
-                                            className={`rounded-xl border p-4 transition ${
-                                                error ? "border-red-400/60 bg-red-500/10" : "border-slate-800 bg-slate-950/60"
-                                            }`}
-                                        >
-                                            <div className="flex items-start justify-between gap-3">
-                                                <div>
-                                                    <h3 className="text-base font-semibold text-slate-100">
-                                                        Ticket {index + 1}
-                                                    </h3>
-                                                    <p className="text-xs text-slate-400">
-                                                        Pick {NUMBER_OF_PICKS} numbers and one lucky number
-                                                    </p>
-                                                </div>
-                                                <div className="flex gap-2">
-                                                    <button
-                                                        type="button"
-                                                        onClick={() => removeManualTicket(ticket.id)}
-                                                        disabled={manualTickets.length <= 1}
-                                                        className="rounded-lg border border-red-400/60 px-3 py-1 text-xs font-semibold text-red-300 transition hover:bg-red-500/20 disabled:cursor-not-allowed disabled:opacity-50"
-                                                    >
-                                                        Remove
-                                                    </button>
-                                                </div>
-                                            </div>
-
-                                            <div className="mt-4 space-y-4">
-                                                <div>
-                                                    <h4 className="text-sm font-semibold text-slate-200">Main numbers</h4>
-                                                    <div className="mt-2 grid grid-cols-9 gap-2">
-                                                        {Array.from({ length: MAX_NUMBER }, (_, idx) => idx + MIN_NUMBER).map(
-                                                            (value) => {
-                                                                const isSelected = ticket.numbers.includes(value);
-                                                                const isLucky = ticket.luckyNumber === value;
-                                                                const isDisabled =
-                                                                    !isSelected &&
-                                                                    ticket.numbers.length >= NUMBER_OF_PICKS;
-
-                                                                return (
-                                                                    <ManualNumberButton
-                                                                        key={value}
-                                                                        value={value}
-                                                                        isSelected={isSelected}
-                                                                        isLucky={isLucky}
-                                                                        disabled={isDisabled}
-                                                                        onClick={() => toggleManualNumber(ticket.id, value)}
-                                                                    />
-                                                                );
-                                                            },
-                                                        )}
-                                                    </div>
-                                                </div>
-
-                                                <div>
-                                                    <h4 className="text-sm font-semibold text-amber-200">Lucky number</h4>
-                                                    <div className="mt-2 grid grid-cols-9 gap-2">
-                                                        {Array.from({ length: MAX_NUMBER }, (_, idx) => idx + MIN_NUMBER).map(
-                                                            (value) => {
-                                                                const isLucky = ticket.luckyNumber === value;
-                                                                const isMain = ticket.numbers.includes(value);
-
-                                                                return (
-                                                                    <LuckyNumberButton
-                                                                        key={`lucky-${value}`}
-                                                                        value={value}
-                                                                        isLucky={Boolean(isLucky)}
-                                                                        isMain={isMain}
-                                                                        onClick={() => setManualLuckyNumber(ticket.id, value)}
-                                                                    />
-                                                                );
-                                                            },
-                                                        )}
-                                                    </div>
-                                                </div>
-                                            </div>
-
-                                            {error && <p className="mt-3 text-sm text-red-300">{error}</p>}
+                        <div className="bg-white/10 backdrop-blur-lg rounded-2xl p-6">
+                            <h2 className="text-xl font-bold text-white mb-4">티켓 구매</h2>
+                            
+                            {address && !isWrongNetwork && activeRound.phase === 'sales' ? (
+                                <div className="space-y-4">
+                                    <div>
+                                        <label className="text-white/80 text-sm mb-2 block">결제 토큰</label>
+                                        <div className="flex gap-2">
+                                            <button
+                                                onClick={() => setUseUSDT(true)}
+                                                className={`flex-1 py-2 rounded-lg font-semibold transition ${
+                                                    useUSDT
+                                                        ? 'bg-emerald-500 text-white'
+                                                        : 'bg-white/10 text-white/60 hover:bg-white/20'
+                                                }`}
+                                            >
+                                                USDT
+                                            </button>
+                                            <button
+                                                onClick={() => setUseUSDT(false)}
+                                                className={`flex-1 py-2 rounded-lg font-semibold transition ${
+                                                    !useUSDT
+                                                        ? 'bg-blue-500 text-white'
+                                                        : 'bg-white/10 text-white/60 hover:bg-white/20'
+                                                }`}
+                                            >
+                                                USDC
+                                            </button>
                                         </div>
-                                    );
-                                })}
-                            </div>
-                        </div>
-                    ) : (
-                        <div className="mt-6 space-y-6">
-                            <div className="flex flex-wrap items-center justify-between gap-3">
-                                <div>
-                                    <p className="text-sm text-slate-300">
-                                        Generate up to {MAX_TICKETS_PER_PURCHASE} unique tickets. Each ticket will include{" "}
-                                        {NUMBER_OF_PICKS} numbers and a separate lucky number.
-                                    </p>
-                                </div>
-                                <div className="flex flex-wrap items-center gap-3">
-                                    <label className="flex items-center gap-2 text-sm">
-                                        Quantity:
+                                        <div className="text-white/60 text-xs mt-2">
+                                            잔액: ${tokenBalance}
+                                        </div>
+                                    </div>
+
+                                    <div>
+                                        <label className="text-white/80 text-sm mb-2 block">티켓 수량</label>
                                         <input
                                             type="number"
-                                            min={1}
-                                            max={MAX_TICKETS_PER_PURCHASE}
-                                            value={autoCount}
-                                            onChange={(event) => setAutoCount(Number(event.target.value))}
-                                            className="w-20 rounded border border-slate-700 bg-slate-900 px-2 py-1 text-sm text-slate-200 focus:outline-none focus:ring-2 focus:ring-emerald-400"
+                                            min="1"
+                                            max="50"
+                                            value={ticketCount}
+                                            onChange={(e) => setTicketCount(Math.max(1, Math.min(50, parseInt(e.target.value) || 1)))}
+                                            className="w-full px-4 py-2 bg-white/10 border border-white/20 rounded-lg text-white"
                                         />
-                                    </label>
-                                    <button
-                                        type="button"
-                                        onClick={resetAutoTickets}
-                                        className="rounded-lg border border-emerald-400 px-3 py-1 text-sm font-semibold text-emerald-200 transition hover:bg-emerald-500/10"
-                                    >
-                                        Refresh tickets
-                                    </button>
-                                </div>
-                            </div>
+                                    </div>
 
-                            <div className="grid gap-3 sm:grid-cols-2">
-                                {autoTickets.map((ticket, index) => (
-                                    <div
-                                        key={ticket.signature}
-                                        className="group rounded-xl border border-slate-800 bg-slate-950/60 p-4 transition hover:border-emerald-400/80 hover:bg-slate-900/70"
-                                    >
-                                        <div className="flex items-center justify-between text-xs text-slate-400">
-                                            <span className="font-semibold uppercase tracking-wide text-slate-500">Ticket {index
- + 1}</span>
-                                            <span className="rounded-full border border-emerald-400/40 bg-emerald-500/10 px-2 py-0.5 text-[11px] font-semibold uppercase tracking-wide text-emerald-200">
-                                                Auto pick
-                                            </span>
+                                    <div className="p-3 bg-white/5 rounded-lg">
+                                        <div className="flex justify-between text-white/80 text-sm mb-1">
+                                            <span>티켓 가격</span>
+                                            <span>${ticketPriceUSD}</span>
                                         </div>
-                                        <div className="mt-3 flex flex-wrap gap-2">
-                                            {ticket.numbers.map((value) => (
-                                                <span
-                                                    key={`${ticket.signature}-${value}`}
-                                                    className="rounded-md border border-emerald-500/20 bg-emerald-500/5 px-2.5 py-1 text-sm font-semibold text-emerald-200"
-                                                >
-                                                    {value}
-                                                </span>
-                                            ))}
-                                        </div>
-                                        <div className="mt-4 flex items-center gap-3 border-t border-slate-800 pt-3">
-                                            <span className="text-xs uppercase tracking-wide text-amber-300/70">Lucky</span>
-                                            <span className="rounded-md border border-amber-400/40 bg-amber-500/10 px-2.5 py-1 text-sm font-semibold text-amber-200">
-                                                {ticket.luckyNumber}
-                                            </span>
+                                        <div className="flex justify-between text-white font-bold">
+                                            <span>총 금액</span>
+                                            <span>${(parseFloat(ticketPriceUSD) * ticketCount).toFixed(2)}</span>
                                         </div>
                                     </div>
-                                ))}
-                            </div>
+
+                                    {needsApproval ? (
+                                        <button
+                                            onClick={handleApprove}
+                                            disabled={loading || !!pendingTransaction}
+                                            className="w-full py-3 bg-yellow-500 hover:bg-yellow-600 disabled:bg-gray-500 text-white font-semibold rounded-lg transition"
+                                        >
+                                            {loading || pendingTransaction ? '처리중...' : '토큰 승인'}
+                                        </button>
+                                    ) : (
+                                        <button
+                                            onClick={handleBuyTickets}
+                                            disabled={loading || !!pendingTransaction}
+                                            className="w-full py-3 bg-emerald-500 hover:bg-emerald-600 disabled:bg-gray-500 text-white font-semibold rounded-lg transition"
+                                        >
+                                            {loading || pendingTransaction ? '처리중...' : '구매하기'}
+                                        </button>
+                                    )}
+
+                                    <div className="text-white/60 text-xs text-center">
+                                        번호는 자동으로 생성됩니다
+                                    </div>
+                                </div>
+                            ) : (
+                                <div className="text-white/60 text-center py-8">
+                                    {!address ? '지갑을 연결해주세요' : 
+                                     isWrongNetwork ? '네트워크를 전환해주세요' :
+                                     '판매가 종료되었습니다'}
+                                </div>
+                            )}
+                        </div>
+                    </div>
+                )}
+
+                <div className="bg-white/10 backdrop-blur-lg rounded-2xl p-6">
+                    <h2 className="text-2xl font-bold text-white mb-4">내 티켓</h2>
+                    {myTickets.length === 0 ? (
+                        <div className="text-white/60 text-center py-8">
+                            구매한 티켓이 없습니다
+                        </div>
+                    ) : (
+                        <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
+                            {myTickets.map((ticket) => (
+                                <div key={ticket.id} className="bg-white/5 rounded-lg p-4">
+                                    <div className="flex justify-between items-start mb-3">
+                                        <div className="text-white/60 text-sm">티켓 #{ticket.id}</div>
+                                        <div className={`px-2 py-1 rounded text-xs font-semibold ${
+                                            ticket.claimed ? 'bg-gray-500' : 
+                                            ticket.tier > 0 ? 'bg-yellow-500' : 'bg-blue-500'
+                                        }`}>
+                                            {ticket.claimed ? '수령완료' : ticket.tier > 0 ? `${ticket.tier}등` : '미당첨'}
+                                        </div>
+                                    </div>
+                                    <div className="flex gap-1 flex-wrap mb-3">
+                                        {ticket.numbers.map((num, i) => (
+                                            <div key={i} className="w-8 h-8 bg-white/20 rounded-full flex items-center justify-center text-white text-sm font-semibold">
+                                                {num}
+                                            </div>
+                                        ))}
+                                        <div className="w-8 h-8 bg-yellow-400/50 rounded-full flex items-center justify-center text-white text-sm font-semibold">
+                                            {ticket.luckyNumber}
+                                        </div>
+                                    </div>
+                                    {ticket.tier > 0 && !ticket.claimed && (
+                                        <button
+                                            onClick={() => claimPrize(BigInt(ticket.id))}
+                                            className="w-full py-2 bg-emerald-500 hover:bg-emerald-600 text-white text-sm font-semibold rounded transition"
+                                        >
+                                            당첨금 수령
+                                        </button>
+                                    )}
+                                </div>
+                            ))}
                         </div>
                     )}
-
-                    <form onSubmit={handleSubmit} className="mt-6 space-y-4">
-                        <button
-                            type="submit"
-                            className="w-full rounded-lg bg-emerald-500 px-4 py-3 text-sm font-semibold text-emerald-950 transition hover:bg-emerald-400 disabled:cursor-not-allowed disabled:opacity-60"
-                            disabled={status === "uploading" || status === "minting"}
-                        >
-                            {status === "uploading"
-                                ? "Uploading metadata…"
-                                : status === "minting"
-                                    ? "Awaiting transaction…"
-                                    : "Buy tickets"}
-                        </button>
-                        {errorMessage && <p className="text-sm text-red-400">{errorMessage}</p>}
-                        {status === "success" && (
-                            <div className="rounded-lg border border-emerald-600 bg-emerald-500/10 p-4 text-sm text-emerald-200">
-                                <p>
-                                    {successTokenIds.length > 1
-                                        ? "Tickets purchased successfully."
-                                        : "Ticket purchased successfully."}
-                                </p>
-                                {successTokenIds.length > 0 && <p>Token IDs: {successTokenIds.join(", ")}</p>}
-                                {transactionHash && (
-                                    <p>
-                                        Transaction:{" "}
-                                        <a
-                                            href={`https://kairos.kaiascan.io/tx/${transactionHash}`}
-                                            className="underline"
-                                            target="_blank"
-                                            rel="noreferrer"
-                                        >
-                                            View on explorer
-                                        </a>
-                                    </p>
-                                )}
-                            </div>
-                        )}
-                    </form>
-                </section>
-
-                {latestTickets.length > 0 && (
-                    <section className="rounded-xl border border-slate-800 bg-slate-900/60 p-6">
-                        <h2 className="text-lg font-semibold">Latest tickets</h2>
-                        <div className="mt-3 grid gap-4">
-                            {latestTickets.map((ticket) => {
-                                const metadata = metadataByTicket[ticket.id];
-                                const fortune = generateFortune(ticket.numbers, ticket.luckyNumber, metadata);
-                                const metadataUrl = resolveIpfsUri(ticket.tokenURI);
-                                const explorerUrl =
-                                    contractAddress && typeof contractAddress === "string"
-                                        ? `https://kairos.kaiascan.io/token/${contractAddress}?a=${ticket.id}`
-                                        : null;
-                                const roundInfo = roundInfoCache[ticket.roundId];
-                                const isClaiming = claimingTicketId === ticket.id;
-                                const hasPendingTx = Boolean(pendingTransaction);
-
-                                let claimStatus = "";
-                                let claimDisabled = false;
-
-                                if (ticket.claimed) {
-                                    claimStatus = "Already claimed.";
-                                    claimDisabled = true;
-                                } else if (ticket.tier === 0) {
-                                    claimStatus = "No prize for this ticket.";
-                                    claimDisabled = true;
-                                } else if (!roundInfo) {
-                                    claimStatus = "Awaiting round status.";
-                                    claimDisabled = true;
-                                } else if (roundInfo.phase !== "claimable") {
-                                    claimStatus = "Round not claimable yet.";
-                                    claimDisabled = true;
-                                } else if (!roundInfo.payoutsFinalized) {
-                                    claimStatus = "Payouts pending finalization.";
-                                    claimDisabled = true;
-                                } else if (hasPendingTx) {
-                                    claimStatus = "Wait for the pending transaction to complete.";
-                                    claimDisabled = true;
-                                } else {
-                                    claimStatus = "Ready to claim!";
-                                }
-
-                                if (isClaiming) {
-                                    claimStatus = "Claiming in progress…";
-                                }
-
-                                const claimButtonLabel = ticket.claimed
-                                    ? "Claimed"
-                                    : isClaiming
-                                        ? "Claiming…"
-                                        : "Claim prize";
-
-                                const roundStatus = roundInfo
-                                    ? `${describePhase(roundInfo.phase)} · ${
-                                          roundInfo.payoutsFinalized ? "Payouts finalized" : "Payouts pending"
-                                      }`
-                                    : "—";
-
-                                const tierLabel = ticket.tier > 0 ? `Tier ${ticket.tier}` : "—";
-
-                                return (
-                                    <div key={ticket.id} className="rounded-lg border border-slate-800 bg-slate-950/60 p-4">
-                                        <div className="flex flex-wrap items-start justify-between gap-3">
-                                            <div>
-                                                <h3 className="text-base font-semibold text-slate-100">
-                                                    Ticket #{ticket.id}
-                                                </h3>
-                                                <p className="text-xs text-slate-500">
-                                                    Purchased {formatTimestamp(ticket.purchasedAt)}
-                                                </p>
-                                            </div>
-                                            <div className="flex flex-wrap gap-2 text-xs">
-                                                {metadataUrl && (
-                                                    <a
-                                                        href={metadataUrl}
-                                                        target="_blank"
-                                                        rel="noreferrer"
-                                                        className="inline-flex items-center rounded border border-emerald-400/60 px-3 py-1 font-semibold text-emerald-200 transition hover:bg-emerald-500/10"
-                                                    >
-                                                        Metadata
-                                                    </a>
-                                                )}
-                                                {explorerUrl && (
-                                                    <a
-                                                        href={explorerUrl}
-                                                        target="_blank"
-                                                        rel="noreferrer"
-                                                        className="inline-flex items-center rounded border border-slate-700 px-3 py-1 font-semibold text-slate-300 transition hover:border-emerald-400 hover:text-emerald-200"
-                                                    >
-                                                        View on explorer
-                                                    </a>
-                                                )}
-                                            </div>
-                                        </div>
-                                        <dl className="mt-3 grid gap-2 text-sm text-slate-300 sm:grid-cols-2">
-                                            <div>
-                                                <dt className="text-slate-500">Round</dt>
-                                                <dd className="font-medium text-slate-100">#{ticket.roundId}</dd>
-                                            </div>
-                                            <div>
-                                                <dt className="text-slate-500">Mode</dt>
-                                                <dd className="font-medium text-slate-100">{ticket.isAutoPick ? "Auto" : "Manual"}</dd>
-                                            </div>
-                                            <div>
-                                                <dt className="text-slate-500">Numbers</dt>
-                                                <dd className="font-medium text-slate-100">{ticket.numbers.join(", ")}</dd>
-                                            </div>
-                                            <div>
-                                                <dt className="text-slate-500">Lucky number</dt>
-                                                <dd className="font-medium text-slate-100">{ticket.luckyNumber}</dd>
-                                            </div>
-                                            <div>
-                                                <dt className="text-slate-500">Winning tier</dt>
-                                                <dd className="font-medium text-slate-100">{tierLabel}</dd>
-                                            </div>
-                                            <div>
-                                                <dt className="text-slate-500">Round payout status</dt>
-                                                <dd className="font-medium text-slate-100">{roundStatus}</dd>
-                                            </div>
-                                            <div className="sm:col-span-2">
-                                                <dt className="text-slate-500">Fortune cookie</dt>
-                                                <dd className="font-medium text-slate-100">{fortune}</dd>
-                                            </div>
-                                        </dl>
-                                        <div className="mt-4 flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
-                                            <button
-                                                type="button"
-                                                onClick={() => void handleClaimPrize(ticket)}
-                                                disabled={claimDisabled || isClaiming}
-                                                className="inline-flex w-full justify-center rounded-lg border border-emerald-400 px-4 py-2 text-sm font-semibold text-emerald-200 transition hover:bg-emerald-500/10 disabled:cursor-not-allowed disabled:opacity-60 sm:w-auto"
-                                            >
-                                                {claimButtonLabel}
-                                            </button>
-                                            <p className="text-xs text-slate-500">{claimStatus}</p>
-                                        </div>
-                                    </div>
-                                );
-                            })}
-                        </div>
-                    </section>
-                )}
-            </div>
-            {toastMessage && (
-                <div className="pointer-events-none fixed right-4 top-4 z-50 max-w-xs rounded-lg border border-red-500/40 bg-red-500/20 px-4 py-3 text-sm text-red-100 shadow-lg">
-                    {toastMessage}
                 </div>
-            )}
-        </main>
+            </div>
+        </div>
     );
 }

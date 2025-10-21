@@ -1,516 +1,321 @@
-'use client';
+"use client";
 
-import { useCallback, useEffect, useMemo, useState } from 'react';
-import type { FormEvent } from 'react';
-import { formatEther } from 'ethers';
+import { useCallback, useEffect, useState } from "react";
+import { useLottoV2ContractContext } from "@/hooks/useLottoV2Contract";
+import type { RoundInfo } from "@/hooks/useLottoV2Contract";
+import { formatUnits } from "ethers";
 
-import RoundStatsGrid from '@/components/RoundStatsGrid';
-import { useLottoContractContext, type RoundInfo } from '@/hooks/useLottoContract';
-
-type OperationLog = {
-    id: number;
-    timestamp: number;
-    action: string;
-    status: 'success' | 'error';
-    message: string;
+const formatTime = (seconds: number) => {
+    const date = new Date(seconds * 1000);
+    return date.toLocaleString('ko-KR', {
+        year: 'numeric',
+        month: 'long',
+        day: 'numeric',
+        hour: '2-digit',
+        minute: '2-digit',
+    });
 };
 
-const formatAddress = (address: string | null | undefined) => {
-    if (!address) {
-        return '—';
-    }
-
-    return `${address.slice(0, 6)}…${address.slice(-4)}`;
-};
-
-const extractErrorMessage = (error: unknown) => {
-    if (error instanceof Error && typeof error.message === 'string') {
-        return error.message;
-    }
-
-    if (typeof error === 'string') {
-        return error;
-    }
-
-    try {
-        return JSON.stringify(error);
-    } catch {
-        return 'Unknown error occurred.';
+const phaseText = (phase: string) => {
+    switch (phase) {
+        case 'sales': return '판매중';
+        case 'drawing': return '추첨중';
+        case 'claimable': return '당첨금 수령 가능';
+        default: return phase;
     }
 };
-
-const phaseLabels: Record<string, string> = {
-    sales: 'Ticket Sales',
-    drawing: 'Drawing',
-    claimable: 'Claimable',
-};
-
-function formatKaia(value: bigint | null | undefined) {
-    if (!value) {
-        return '—';
-    }
-    try {
-        return `${formatEther(value)} KAIA`;
-    } catch {
-        return value.toString();
-    }
-}
 
 export default function AdminPage() {
     const {
-        provider,
         address,
-        ownerAddress,
-        allowedAdminAddresses,
-        connectWallet,
-        disconnectWallet,
-        isConnecting,
-        isWalletAvailable,
-        isWrongNetwork,
-        switchToExpectedNetwork,
-        expectedChainId,
-        pendingTransaction,
         isAuthorizedOperator,
         currentRoundId,
-        getActiveRound,
         getRoundInfo,
         closeCurrentRound,
         startNextRound,
         requestRandomWinningNumbers,
         finalizePayouts,
-    } = useLottoContractContext();
+        autoProgressRound,
+    } = useLottoV2ContractContext();
 
-    const [roundInfo, setRoundInfo] = useState<RoundInfo | null>(null);
-    const [logs, setLogs] = useState<OperationLog[]>([]);
-    const [requestRound, setRequestRound] = useState('');
-    const [finalizeRound, setFinalizeRound] = useState('');
-    const [nextRoundStart, setNextRoundStart] = useState('');
-    const [isLoadingRound, setIsLoadingRound] = useState(false);
-    const [toastMessage, setToastMessage] = useState<string | null>(null);
+    const [rounds, setRounds] = useState<RoundInfo[]>([]);
+    const [loading, setLoading] = useState(false);
+    const [message, setMessage] = useState<string | null>(null);
+    const [selectedRound, setSelectedRound] = useState<bigint | null>(null);
 
-    const normalizedAdmins = useMemo(
-        () => allowedAdminAddresses.map((value) => value.toLowerCase()),
-        [allowedAdminAddresses],
-    );
+    useEffect(() => {
+        if (!currentRoundId) return;
 
-    const appendLog = (entry: Omit<OperationLog, 'id' | 'timestamp'>) => {
-        const timestamp = Date.now();
-        setLogs((previous) => [
-            {
-                ...entry,
-                id: timestamp + Math.random(),
-                timestamp,
-            },
-            ...previous,
-        ]);
-    };
-
-    const refreshRound = useCallback(() => {
-        setIsLoadingRound(true);
-        void (async () => {
-            try {
-                const info = await getActiveRound();
-                setRoundInfo(info);
-            } finally {
-                setIsLoadingRound(false);
+        const loadRounds = async () => {
+            const roundsData: RoundInfo[] = [];
+            const startId = currentRoundId > 10n ? currentRoundId - 9n : 1n;
+            
+            for (let i = startId; i <= currentRoundId; i++) {
+                const info = await getRoundInfo(i);
+                if (info) roundsData.push(info);
             }
-        })();
-    }, [getActiveRound]);
-
-    useEffect(() => {
-        if (!isWrongNetwork) {
-            refreshRound();
-        }
-    }, [isWrongNetwork, refreshRound]);
-
-    useEffect(() => {
-        if (!toastMessage) {
-            return;
-        }
-
-        const timeout = window.setTimeout(() => {
-            setToastMessage(null);
-        }, 4000);
-
-        return () => {
-            window.clearTimeout(timeout);
+            
+            setRounds(roundsData.reverse());
         };
-    }, [toastMessage]);
 
-    const handleConnectWallet = async () => {
-        try {
-            setToastMessage(null);
-            await connectWallet();
-        } catch (error) {
-            console.error('Failed to connect wallet', error);
-            setToastMessage(extractErrorMessage(error));
-        }
-    };
+        loadRounds();
+    }, [currentRoundId, getRoundInfo]);
 
-    const handleDisconnectWallet = async () => {
-        try {
-            setToastMessage(null);
-            await disconnectWallet();
-        } catch (error) {
-            console.error('Failed to disconnect wallet', error);
-            setToastMessage(extractErrorMessage(error));
-        }
+    const showMessage = (msg: string) => {
+        setMessage(msg);
+        setTimeout(() => setMessage(null), 4000);
     };
 
     const handleCloseRound = async () => {
+        setLoading(true);
         try {
-            appendLog({ action: 'closeCurrentRound', status: 'success', message: 'Closing round…' });
-            const receipt = await closeCurrentRound();
-            appendLog({
-                action: 'closeCurrentRound',
-                status: 'success',
-                message: receipt ? `Closed round in tx ${receipt.hash}` : 'Round closed.',
-            });
-            refreshRound();
-        } catch (error) {
-            appendLog({
-                action: 'closeCurrentRound',
-                status: 'error',
-                message: extractErrorMessage(error),
-            });
+            await closeCurrentRound();
+            showMessage('회차 종료 완료');
+            window.location.reload();
+        } catch (error: any) {
+            showMessage(error.message || '회차 종료 실패');
+        } finally {
+            setLoading(false);
         }
     };
 
-    const handleStartNextRound = async (event: FormEvent<HTMLFormElement>) => {
-        event.preventDefault();
-        const label = nextRoundStart.trim().length > 0
-            ? `Start next round at ${nextRoundStart}`
-            : 'Start next round now';
-
+    const handleStartNextRound = async () => {
+        setLoading(true);
         try {
-            appendLog({ action: 'startNextRound', status: 'success', message: `${label}…` });
-            const timestamp = nextRoundStart.trim().length > 0
-                ? Number.parseInt(nextRoundStart.trim(), 10)
-                : undefined;
-            const receipt = await startNextRound(timestamp);
-            appendLog({
-                action: 'startNextRound',
-                status: 'success',
-                message: receipt ? `Started new round in tx ${receipt.hash}` : 'Started new round.',
-            });
-            setNextRoundStart('');
-            refreshRound();
-        } catch (error) {
-            appendLog({
-                action: 'startNextRound',
-                status: 'error',
-                message: extractErrorMessage(error),
-            });
+            await startNextRound();
+            showMessage('새 회차 시작 완료');
+            window.location.reload();
+        } catch (error: any) {
+            showMessage(error.message || '새 회차 시작 실패');
+        } finally {
+            setLoading(false);
         }
     };
 
-    const handleRequestRandomness = async (event: FormEvent<HTMLFormElement>) => {
-        event.preventDefault();
+    const handleRequestRandom = async (roundId: bigint) => {
+        setLoading(true);
         try {
-            const roundValue = Number.parseInt(requestRound.trim(), 10);
-            if (Number.isNaN(roundValue)) {
-                throw new Error('Round ID must be a number.');
-            }
-            appendLog({ action: 'requestRandom', status: 'success', message: `Requesting VRF for round #${roundValue}…` });
-            const receipt = await requestRandomWinningNumbers(roundValue);
-            appendLog({
-                action: 'requestRandom',
-                status: 'success',
-                message: receipt ? `Randomness requested (tx ${receipt.hash}).` : 'Randomness requested.',
-            });
-            setRequestRound('');
-        } catch (error) {
-            appendLog({
-                action: 'requestRandom',
-                status: 'error',
-                message: extractErrorMessage(error),
-            });
+            await requestRandomWinningNumbers(roundId);
+            showMessage('당첨 번호 요청 완료');
+            setTimeout(() => window.location.reload(), 2000);
+        } catch (error: any) {
+            showMessage(error.message || '당첨 번호 요청 실패');
+        } finally {
+            setLoading(false);
         }
     };
 
-    const handleFinalizePayouts = async (event: FormEvent<HTMLFormElement>) => {
-        event.preventDefault();
+    const handleFinalizePayouts = async (roundId: bigint) => {
+        setLoading(true);
         try {
-            const roundValue = Number.parseInt(finalizeRound.trim(), 10);
-            if (Number.isNaN(roundValue)) {
-                throw new Error('Round ID must be a number.');
-            }
-            appendLog({ action: 'finalizePayouts', status: 'success', message: `Finalizing payouts for round #${roundValue}…` });
-            const receipt = await finalizePayouts(roundValue);
-            appendLog({
-                action: 'finalizePayouts',
-                status: 'success',
-                message: receipt ? `Payouts finalized (tx ${receipt.hash}).` : 'Payouts finalized.',
-            });
-            setFinalizeRound('');
-            refreshRound();
-        } catch (error) {
-            appendLog({
-                action: 'finalizePayouts',
-                status: 'error',
-                message: extractErrorMessage(error),
-            });
+            await finalizePayouts(roundId);
+            showMessage('당첨금 정산 완료');
+            window.location.reload();
+        } catch (error: any) {
+            showMessage(error.message || '당첨금 정산 실패');
+        } finally {
+            setLoading(false);
         }
     };
 
-    const reloadRoundDetails = async (roundId: bigint) => {
-        const info = await getRoundInfo(roundId);
-        if (info) {
-            setRoundInfo(info);
+    const handleAutoProgress = async () => {
+        setLoading(true);
+        try {
+            await autoProgressRound();
+            showMessage('자동 진행 완료');
+            window.location.reload();
+        } catch (error: any) {
+            showMessage(error.message || '자동 진행 실패');
+        } finally {
+            setLoading(false);
         }
     };
 
-    useEffect(() => {
-        if (currentRoundId !== null && !isWrongNetwork) {
-            void reloadRoundDetails(currentRoundId);
-        }
-    }, [currentRoundId, getRoundInfo, isWrongNetwork]);
+    if (!address) {
+        return (
+            <div className="min-h-screen bg-gradient-to-br from-purple-900 via-blue-900 to-indigo-900 flex items-center justify-center p-4">
+                <div className="bg-white/10 backdrop-blur-lg rounded-2xl p-8 max-w-md w-full text-center">
+                    <h1 className="text-2xl font-bold text-white mb-4">지갑을 연결해주세요</h1>
+                </div>
+            </div>
+        );
+    }
+
+    if (!isAuthorizedOperator) {
+        return (
+            <div className="min-h-screen bg-gradient-to-br from-purple-900 via-blue-900 to-indigo-900 flex items-center justify-center p-4">
+                <div className="bg-white/10 backdrop-blur-lg rounded-2xl p-8 max-w-md w-full text-center">
+                    <h1 className="text-2xl font-bold text-white mb-4">접근 권한이 없습니다</h1>
+                    <p className="text-white/80">관리자만 접근할 수 있습니다.</p>
+                </div>
+            </div>
+        );
+    }
+
+    const currentRound = rounds.find(r => r.id === currentRoundId);
+    const totalTickets = rounds.reduce((sum, r) => sum + Number(r.ticketCount), 0);
+    const totalRevenueUSDT = rounds.reduce((sum, r) => sum + Number(formatUnits(r.grossUSDT, 6)), 0);
+    const totalRevenueUSDC = rounds.reduce((sum, r) => sum + Number(formatUnits(r.grossUSDC, 6)), 0);
 
     return (
-        <main className="min-h-screen bg-slate-950 text-slate-100">
-            <div className="mx-auto flex w-full max-w-4xl flex-col gap-6 px-4 py-12">
-                <header className="flex flex-col gap-2">
-                    <h1 className="text-3xl font-semibold">Lucky Chain Admin Console</h1>
-                    <p className="text-sm text-slate-400">
-                        Manage weekly rounds, trigger randomness, and settle payouts for the Lucky Chain lottery.
-                    </p>
+        <div className="min-h-screen bg-gradient-to-br from-purple-900 via-blue-900 to-indigo-900">
+            <div className="container mx-auto px-4 py-6 max-w-7xl">
+                <header className="mb-8">
+                    <div className="flex flex-col sm:flex-row justify-between items-center gap-4">
+                        <h1 className="text-3xl sm:text-4xl font-bold text-white">🎰 관리자 대시보드</h1>
+                        <a
+                            href="/"
+                            className="px-6 py-3 bg-white/10 hover:bg-white/20 text-white font-semibold rounded-lg transition"
+                        >
+                            메인으로
+                        </a>
+                    </div>
                 </header>
 
-                <section className="rounded-xl border border-slate-800 bg-slate-900/60 p-6">
-                    <h2 className="text-lg font-semibold">Wallet</h2>
-                    <div className="mt-3 flex flex-col gap-2 text-sm text-slate-300">
-                        <div>
-                            <span className="font-medium text-slate-200">Connected wallet:</span>{' '}
-                            {formatAddress(address)}
-                        </div>
-                        <div>
-                            <span className="font-medium text-slate-200">Owner:</span>{' '}
-                            {formatAddress(ownerAddress)}
-                        </div>
-                        <div>
-                            <span className="font-medium text-slate-200">Authorized admins:</span>{' '}
-                            {normalizedAdmins.length > 0 ? normalizedAdmins.join(', ') : '—'}
-                        </div>
-                        <div>
-                            <span className="font-medium text-slate-200">Network status:</span>{' '}
-                            {isWrongNetwork ? `Wrong network (expected chain ID ${expectedChainId})` : 'Ready'}
-                        </div>
-                        <div>
-                            <span className="font-medium text-slate-200">Pending tx:</span>{' '}
-                            {pendingTransaction ?? '—'}
-                        </div>
+                {message && (
+                    <div className="mb-6 p-4 bg-emerald-500/20 border border-emerald-500/50 rounded-lg text-white text-center">
+                        {message}
                     </div>
-                    <div className="mt-4 flex flex-wrap gap-3">
-                        {!isWalletAvailable && (
-                            <p className="text-sm text-red-400">No EVM wallet detected in this browser.</p>
-                        )}
-                        <button
-                            type="button"
-                            onClick={() => void handleConnectWallet()}
-                            disabled={isConnecting || !provider}
-                            className="rounded-lg bg-emerald-500 px-4 py-2 text-sm font-semibold text-emerald-950 transition hover:bg-emerald-400 disabled:cursor-not-allowed disabled:opacity-60"
-                        >
-                            {isConnecting ? 'Connecting…' : 'Connect wallet'}
-                        </button>
-                        <button
-                            type="button"
-                            onClick={() => void handleDisconnectWallet()}
-                            disabled={!address}
-                            className="rounded-lg border border-slate-700 px-4 py-2 text-sm font-semibold text-slate-200 transition hover:border-red-400 hover:text-red-200 disabled:cursor-not-allowed disabled:opacity-60"
-                        >
-                            Disconnect
-                        </button>
-                        {isWrongNetwork && (
-                            <button
-                                type="button"
-                                onClick={() => void switchToExpectedNetwork()}
-                                className="rounded-lg border border-amber-400 px-4 py-2 text-sm font-semibold text-amber-200 transition hover:bg-amber-500/20"
-                            >
-                                Switch network
-                            </button>
-                        )}
+                )}
+
+                <div className="grid grid-cols-1 md:grid-cols-3 gap-6 mb-8">
+                    <div className="bg-white/10 backdrop-blur-lg rounded-2xl p-6">
+                        <div className="text-white/60 text-sm mb-2">총 회차</div>
+                        <div className="text-white text-3xl font-bold">{rounds.length}</div>
                     </div>
-                </section>
-
-                <section className="rounded-xl border border-slate-800 bg-slate-900/60 p-6">
-                    <div className="flex items-center justify-between">
-                        <h2 className="text-lg font-semibold">Active round</h2>
-                        <button
-                            type="button"
-                            onClick={refreshRound}
-                            className="text-xs font-semibold text-emerald-400 hover:text-emerald-300"
-                        >
-                            Refresh
-                        </button>
+                    <div className="bg-white/10 backdrop-blur-lg rounded-2xl p-6">
+                        <div className="text-white/60 text-sm mb-2">총 판매 티켓</div>
+                        <div className="text-white text-3xl font-bold">{totalTickets.toLocaleString()}장</div>
                     </div>
-                    <RoundStatsGrid round={roundInfo} className="mt-4" />
-                    <div className="mt-3 text-sm text-slate-300">
-                        {isLoadingRound && <p>Loading round information…</p>}
-                        {!isLoadingRound && roundInfo && (
-                            <dl className="grid gap-2 sm:grid-cols-2">
-                                <div>
-                                    <dt className="text-slate-500">Round ID</dt>
-                                    <dd className="font-medium text-slate-100">{roundInfo.id.toString()}</dd>
-                                </div>
-                                <div>
-                                    <dt className="text-slate-500">Phase</dt>
-                                    <dd className="font-medium text-slate-100">{phaseLabels[roundInfo.phase]}</dd>
-                                </div>
-                                <div>
-                                    <dt className="text-slate-500">Ticket count</dt>
-                                    <dd className="font-medium text-slate-100">{roundInfo.ticketCount.toString()}</dd>
-                                </div>
-                                <div>
-                                    <dt className="text-slate-500">Gross sales</dt>
-                                    <dd className="font-medium text-slate-100">{formatKaia(roundInfo.gross)}</dd>
-                                </div>
-                                <div>
-                                    <dt className="text-slate-500">Carry in</dt>
-                                    <dd className="font-medium text-slate-100">{formatKaia(roundInfo.carryIn)}</dd>
-                                </div>
-                                <div>
-                                    <dt className="text-slate-500">Carry out</dt>
-                                    <dd className="font-medium text-slate-100">{formatKaia(roundInfo.carryOut)}</dd>
-                                </div>
-                                <div>
-                                    <dt className="text-slate-500">Winning numbers</dt>
-                                    <dd className="font-medium text-slate-100">
-                                        {roundInfo.winningNumbers.length > 0
-                                            ? `${roundInfo.winningNumbers.join(', ')} | Lucky ${roundInfo.luckyNumber ?? '—'}`
-                                            : '—'}
-                                    </dd>
-                                </div>
-                                <div>
-                                    <dt className="text-slate-500">Payouts finalized</dt>
-                                    <dd className="font-medium text-slate-100">{roundInfo.payoutsFinalized ? 'Yes' : 'No'}</dd>
-                                </div>
-                            </dl>
-                        )}
-                        {!isLoadingRound && !roundInfo && (
-                            <p>No active round information available.</p>
-                        )}
+                    <div className="bg-white/10 backdrop-blur-lg rounded-2xl p-6">
+                        <div className="text-white/60 text-sm mb-2">총 매출</div>
+                        <div className="text-emerald-400 text-2xl font-bold">${totalRevenueUSDT.toFixed(2)}</div>
+                        <div className="text-blue-400 text-2xl font-bold">${totalRevenueUSDC.toFixed(2)}</div>
                     </div>
-                </section>
-
-                <section className="grid gap-4 md:grid-cols-2">
-                    <div className="rounded-xl border border-slate-800 bg-slate-900/60 p-6">
-                        <h3 className="text-lg font-semibold">Close round</h3>
-                        <p className="mt-2 text-sm text-slate-400">
-                            Ends ticket sales for the current round. Requires the round sales window to have elapsed.
-                        </p>
-                        <button
-                            type="button"
-                            onClick={handleCloseRound}
-                            disabled={!isAuthorizedOperator}
-                            className="mt-4 w-full rounded-lg bg-red-500 px-4 py-2 text-sm font-semibold text-red-950 transition hover:bg-red-400 disabled:cursor-not-allowed disabled:opacity-60"
-                        >
-                            Close current round
-                        </button>
-                    </div>
-
-                    <form
-                        className="rounded-xl border border-slate-800 bg-slate-900/60 p-6"
-                        onSubmit={handleStartNextRound}
-                    >
-                        <h3 className="text-lg font-semibold">Start next round</h3>
-                        <p className="mt-2 text-sm text-slate-400">
-                            Optionally specify a Unix timestamp for the new round start. Leave blank to open immediately.
-                        </p>
-                        <label className="mt-4 block text-xs font-semibold uppercase tracking-wide text-slate-400">
-                            Start timestamp (seconds)
-                        </label>
-                        <input
-                            value={nextRoundStart}
-                            onChange={(event) => setNextRoundStart(event.target.value)}
-                            placeholder="Now"
-                            className="mt-2 w-full rounded-lg border border-slate-700 bg-slate-950 px-3 py-2 text-sm text-slate-100 focus:border-emerald-400 focus:outline-none"
-                        />
-                        <button
-                            type="submit"
-                            disabled={!isAuthorizedOperator}
-                            className="mt-4 w-full rounded-lg bg-emerald-500 px-4 py-2 text-sm font-semibold text-emerald-950 transition hover:bg-emerald-400 disabled:cursor-not-allowed disabled:opacity-60"
-                        >
-                            Start next round
-                        </button>
-                    </form>
-                </section>
-
-                <section className="grid gap-4 md:grid-cols-2">
-                    <form
-                        className="rounded-xl border border-slate-800 bg-slate-900/60 p-6"
-                        onSubmit={handleRequestRandomness}
-                    >
-                        <h3 className="text-lg font-semibold">Request winning numbers</h3>
-                        <p className="mt-2 text-sm text-slate-400">
-                            Request Chainlink VRF randomness for a completed round (must be in the Drawing phase).
-                        </p>
-                        <label className="mt-4 block text-xs font-semibold uppercase tracking-wide text-slate-400">
-                            Round ID
-                        </label>
-                        <input
-                            value={requestRound}
-                            onChange={(event) => setRequestRound(event.target.value)}
-                            className="mt-2 w-full rounded-lg border border-slate-700 bg-slate-950 px-3 py-2 text-sm text-slate-100 focus:border-emerald-400 focus:outline-none"
-                        />
-                        <button
-                            type="submit"
-                            disabled={!isAuthorizedOperator}
-                            className="mt-4 w-full rounded-lg bg-blue-500 px-4 py-2 text-sm font-semibold text-blue-950 transition hover:bg-blue-400 disabled:cursor-not-allowed disabled:opacity-60"
-                        >
-                            Request randomness
-                        </button>
-                    </form>
-
-                    <form
-                        className="rounded-xl border border-slate-800 bg-slate-900/60 p-6"
-                        onSubmit={handleFinalizePayouts}
-                    >
-                        <h3 className="text-lg font-semibold">Finalize payouts</h3>
-                        <p className="mt-2 text-sm text-slate-400">
-                            Calculates tier prizes and moves carry-over after winning numbers are set.
-                        </p>
-                        <label className="mt-4 block text-xs font-semibold uppercase tracking-wide text-slate-400">
-                            Round ID
-                        </label>
-                        <input
-                            value={finalizeRound}
-                            onChange={(event) => setFinalizeRound(event.target.value)}
-                            className="mt-2 w-full rounded-lg border border-slate-700 bg-slate-950 px-3 py-2 text-sm text-slate-100 focus:border-emerald-400 focus:outline-none"
-                        />
-                        <button
-                            type="submit"
-                            disabled={!isAuthorizedOperator}
-                            className="mt-4 w-full rounded-lg bg-purple-500 px-4 py-2 text-sm font-semibold text-purple-950 transition hover:bg-purple-400 disabled:cursor-not-allowed disabled:opacity-60"
-                        >
-                            Finalize payouts
-                        </button>
-                    </form>
-                </section>
-
-                <section className="rounded-xl border border-slate-800 bg-slate-900/60 p-6">
-                    <h3 className="text-lg font-semibold">Activity log</h3>
-                    <div className="mt-3 space-y-3 text-sm text-slate-300">
-                        {logs.length === 0 && <p>No administrative actions recorded yet.</p>}
-                        {logs.map((log) => (
-                            <div key={log.id} className="rounded-lg border border-slate-800 bg-slate-950/70 p-3">
-                                <div className="flex items-center justify-between text-xs text-slate-500">
-                                    <span>{new Date(log.timestamp).toLocaleString()}</span>
-                                    <span className={log.status === 'success' ? 'text-emerald-400' : 'text-red-400'}>
-                                        {log.status.toUpperCase()}
-                                    </span>
-                                </div>
-                                <div className="mt-1 font-semibold text-slate-200">{log.action}</div>
-                                <div className="text-slate-300">{log.message}</div>
-                            </div>
-                        ))}
-                    </div>
-                </section>
-            </div>
-            {toastMessage && (
-                <div className="pointer-events-none fixed right-4 top-4 z-50 max-w-xs rounded-lg border border-red-500/40 bg-red-500/20 px-4 py-3 text-sm text-red-100 shadow-lg">
-                    {toastMessage}
                 </div>
-            )}
-        </main>
+
+                {currentRound && (
+                    <div className="bg-white/10 backdrop-blur-lg rounded-2xl p-6 mb-8">
+                        <h2 className="text-2xl font-bold text-white mb-4">현재 회차 관리</h2>
+                        
+                        <div className="grid grid-cols-2 md:grid-cols-4 gap-4 mb-6">
+                            <div>
+                                <div className="text-white/60 text-sm mb-1">회차</div>
+                                <div className="text-white text-xl font-bold">#{currentRound.id.toString()}</div>
+                            </div>
+                            <div>
+                                <div className="text-white/60 text-sm mb-1">상태</div>
+                                <div className="text-white text-xl font-bold">{phaseText(currentRound.phase)}</div>
+                            </div>
+                            <div>
+                                <div className="text-white/60 text-sm mb-1">판매 티켓</div>
+                                <div className="text-white text-xl font-bold">{currentRound.ticketCount.toString()}장</div>
+                            </div>
+                            <div>
+                                <div className="text-white/60 text-sm mb-1">종료 시간</div>
+                                <div className="text-white text-sm">{formatTime(currentRound.endTime)}</div>
+                            </div>
+                        </div>
+
+                        <div className="flex flex-wrap gap-3">
+                            {currentRound.phase === 'sales' && (
+                                <>
+                                    <button
+                                        onClick={handleAutoProgress}
+                                        disabled={loading}
+                                        className="px-4 py-2 bg-blue-500 hover:bg-blue-600 disabled:bg-gray-500 text-white font-semibold rounded-lg transition"
+                                    >
+                                        자동 진행
+                                    </button>
+                                    <button
+                                        onClick={handleCloseRound}
+                                        disabled={loading}
+                                        className="px-4 py-2 bg-orange-500 hover:bg-orange-600 disabled:bg-gray-500 text-white font-semibold rounded-lg transition"
+                                    >
+                                        회차 종료
+                                    </button>
+                                </>
+                            )}
+                            {currentRound.phase === 'drawing' && (
+                                <button
+                                    onClick={() => handleRequestRandom(currentRound.id)}
+                                    disabled={loading}
+                                    className="px-4 py-2 bg-purple-500 hover:bg-purple-600 disabled:bg-gray-500 text-white font-semibold rounded-lg transition"
+                                >
+                                    당첨 번호 추첨
+                                </button>
+                            )}
+                            {currentRound.phase === 'claimable' && !currentRound.payoutsFinalized && (
+                                <button
+                                    onClick={() => handleFinalizePayouts(currentRound.id)}
+                                    disabled={loading}
+                                    className="px-4 py-2 bg-emerald-500 hover:bg-emerald-600 disabled:bg-gray-500 text-white font-semibold rounded-lg transition"
+                                >
+                                    당첨금 정산
+                                </button>
+                            )}
+                            {currentRound.phase === 'claimable' && currentRound.payoutsFinalized && (
+                                <button
+                                    onClick={handleStartNextRound}
+                                    disabled={loading}
+                                    className="px-4 py-2 bg-green-500 hover:bg-green-600 disabled:bg-gray-500 text-white font-semibold rounded-lg transition"
+                                >
+                                    다음 회차 시작
+                                </button>
+                            )}
+                        </div>
+                    </div>
+                )}
+
+                <div className="bg-white/10 backdrop-blur-lg rounded-2xl p-6">
+                    <h2 className="text-2xl font-bold text-white mb-4">회차 내역</h2>
+                    
+                    <div className="overflow-x-auto">
+                        <table className="w-full text-white">
+                            <thead>
+                                <tr className="border-b border-white/20">
+                                    <th className="text-left py-3 px-2">회차</th>
+                                    <th className="text-left py-3 px-2">상태</th>
+                                    <th className="text-right py-3 px-2">티켓</th>
+                                    <th className="text-right py-3 px-2">매출 (USDT)</th>
+                                    <th className="text-right py-3 px-2">매출 (USDC)</th>
+                                    <th className="text-center py-3 px-2">당첨자</th>
+                                    <th className="text-left py-3 px-2">종료 시간</th>
+                                </tr>
+                            </thead>
+                            <tbody>
+                                {rounds.map((round) => (
+                                    <tr key={round.id.toString()} className="border-b border-white/10 hover:bg-white/5">
+                                        <td className="py-3 px-2">#{round.id.toString()}</td>
+                                        <td className="py-3 px-2">
+                                            <span className={`px-2 py-1 rounded text-xs font-semibold ${
+                                                round.phase === 'sales' ? 'bg-green-500' :
+                                                round.phase === 'drawing' ? 'bg-yellow-500' :
+                                                'bg-blue-500'
+                                            }`}>
+                                                {phaseText(round.phase)}
+                                            </span>
+                                        </td>
+                                        <td className="py-3 px-2 text-right">{round.ticketCount.toString()}</td>
+                                        <td className="py-3 px-2 text-right">${formatUnits(round.grossUSDT, 6)}</td>
+                                        <td className="py-3 px-2 text-right">${formatUnits(round.grossUSDC, 6)}</td>
+                                        <td className="py-3 px-2 text-center">
+                                            {round.firstWinners > 0 || round.secondWinners > 0 || round.thirdWinners > 0 ? (
+                                                <span className="text-xs">
+                                                    1등:{round.firstWinners} 2등:{round.secondWinners} 3등:{round.thirdWinners}
+                                                </span>
+                                            ) : (
+                                                <span className="text-white/40">-</span>
+                                            )}
+                                        </td>
+                                        <td className="py-3 px-2 text-sm">{formatTime(round.endTime)}</td>
+                                    </tr>
+                                ))}
+                            </tbody>
+                        </table>
+                    </div>
+                </div>
+            </div>
+        </div>
     );
 }
