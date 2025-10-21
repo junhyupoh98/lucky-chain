@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { Suspense, useEffect, useState } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
 import Link from "next/link";
 import { Sparkles } from "lucide-react";
@@ -18,7 +18,7 @@ const fortuneMessages = [
   "당신의 선택은 옳았습니다! 💎",
 ];
 
-export default function FortunePage() {
+function FortuneContent() {
   const router = useRouter();
   const searchParams = useSearchParams();
   const [fortune, setFortune] = useState("");
@@ -127,5 +127,13 @@ export default function FortunePage() {
         </div>
       </div>
     </div>
+  );
+}
+
+export default function FortunePage() {
+  return (
+    <Suspense fallback={<div className="min-h-screen flex items-center justify-center text-white">로딩...</div>}>
+      <FortuneContent />
+    </Suspense>
   );
 }

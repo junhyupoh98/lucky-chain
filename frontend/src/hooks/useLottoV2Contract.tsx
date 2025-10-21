@@ -262,13 +262,13 @@ function useLottoV2Contract(): LottoV2ContractContextValue {
 
     const contractWithSigner = useMemo(() => {
         if (!signer || !CONTRACT_ADDRESS) return null;
-        return new Contract(CONTRACT_ADDRESS, lottoAbi, signer);
+        return new Contract(CONTRACT_ADDRESS, (lottoAbi as any).abi, signer);
     }, [signer]);
 
     const readContract = useMemo(() => {
         const providerToUse = provider || staticProvider;
         if (!providerToUse || !CONTRACT_ADDRESS) return null;
-        return new Contract(CONTRACT_ADDRESS, lottoAbi, providerToUse);
+        return new Contract(CONTRACT_ADDRESS, (lottoAbi as any).abi, providerToUse);
     }, [provider, staticProvider]);
 
     useEffect(() => {

@@ -1,7 +1,7 @@
 import type { ReactNode } from "react";
-import { formatEther } from "ethers";
+import { formatUnits } from "ethers";
 
-import type { RoundInfo } from "@/hooks/useLottoContract";
+import type { RoundInfo } from "@/hooks/useLottoV2Contract";
 
 type RoundStatsGridProps = {
     round?: RoundInfo | null;
@@ -9,21 +9,22 @@ type RoundStatsGridProps = {
     footer?: ReactNode;
 };
 
-const formatKaia = (value: bigint | null | undefined): string => {
+const formatUSD = (value: bigint | null | undefined): string => {
     if (value == null) {
         return "—";
     }
 
     try {
-        return `${formatEther(value)} KAIA`;
+        return `$${Number(formatUnits(value, 6)).toFixed(2)}`;
     } catch (error) {
-        console.error("Failed to format KAIA amount", error);
+        console.error("Failed to format USD amount", error);
         return value.toString();
     }
 };
 
 export function RoundStatsGrid({ round, className, footer }: RoundStatsGridProps) {
-    const jackpotPool = round ? round.gross + round.carryIn : null;
+    const jackpotPoolUSDT = round ? round.grossUSDT + round.carryInUSDT : null;
+    const jackpotPoolUSDC = round ? round.grossUSDC + round.carryInUSDC : null;
     const ticketsSold = round ? round.ticketCount.toString() : "—";
 
     const stats = [
@@ -33,14 +34,24 @@ export function RoundStatsGrid({ round, className, footer }: RoundStatsGridProps
             hint: round ? "Total NFTs minted for the active round." : undefined,
         },
         {
-            label: "Total spent",
-            value: formatKaia(round?.gross),
-            hint: "Aggregate ticket sales paid so far.",
+            label: "Total spent (USDT)",
+            value: formatUSD(round?.grossUSDT),
+            hint: "Aggregate ticket sales paid in USDT.",
         },
         {
-            label: "Jackpot size",
-            value: formatKaia(jackpotPool),
-            hint: "Carry-in plus current round sales.",
+            label: "Total spent (USDC)",
+            value: formatUSD(round?.grossUSDC),
+            hint: "Aggregate ticket sales paid in USDC.",
+        },
+        {
+            label: "Jackpot size (USDT)",
+            value: formatUSD(jackpotPoolUSDT),
+            hint: "Carry-in plus current round USDT sales.",
+        },
+        {
+            label: "Jackpot size (USDC)",
+            value: formatUSD(jackpotPoolUSDC),
+            hint: "Carry-in plus current round USDC sales.",
         },
     ];
 

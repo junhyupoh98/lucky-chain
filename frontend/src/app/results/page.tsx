@@ -350,7 +350,7 @@ export default function ResultsPage() {
 
                       {/* Show user's winning tickets for this round */}
                       {myTickets.filter(
-                        (t) => t.roundId === round.id && t.tier > 0
+                        (t) => BigInt(t.roundId) === round.id && t.tier > 0
                       ).length > 0 && (
                         <div className="mt-6">
                           <h4 className="text-white font-semibold mb-3">
@@ -359,7 +359,7 @@ export default function ResultsPage() {
                           <div className="space-y-3">
                             {myTickets
                               .filter(
-                                (t) => t.roundId === round.id && t.tier > 0
+                                (t) => BigInt(t.roundId) === round.id && t.tier > 0
                               )
                               .map((ticket) => (
                                 <div
